@@ -1,5 +1,6 @@
 node_modules/
 data/
+teams-session/
 .env
 *.log
 msal-cache.json

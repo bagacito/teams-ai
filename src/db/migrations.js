@@ -110,6 +110,24 @@ const migrations = [
       db.exec(`DROP TABLE IF EXISTS subscriptions`); // Graph subscriptions removed (Power Automate bridge)
     },
   },
+  {
+    version: 3,
+    up: (db) => {
+      // Teams MCP polling: per-chat poll cursors.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS chat_poll_state (
+          chat_id TEXT PRIMARY KEY,
+          last_message_id TEXT,
+          last_message_timestamp TEXT,
+          last_poll_at TEXT,
+          last_success_at TEXT,
+          last_error TEXT
+        );
+      `);
+      // Power Automate outbound request ids are gone.
+      db.exec(`ALTER TABLE drafts DROP COLUMN outbound_request_id`);
+    },
+  },
 ];
 
 export function runMigrations(db) {

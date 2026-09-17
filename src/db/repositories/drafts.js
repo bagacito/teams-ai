@@ -10,6 +10,7 @@ export function createDraftRepo(db) {
     bySource: db.prepare(
       "SELECT * FROM drafts WHERE source_message_id = ? AND status IN ('pending','edited','sending','sent') ORDER BY id DESC LIMIT 1",
     ),
+    anyForSource: db.prepare('SELECT 1 FROM drafts WHERE source_message_id = ? LIMIT 1'),
     list: db.prepare('SELECT * FROM drafts WHERE status = ? ORDER BY created_at DESC, id DESC'),
     recent: db.prepare('SELECT * FROM drafts ORDER BY created_at DESC, id DESC LIMIT ?'),
     countByStatus: db.prepare('SELECT status, COUNT(*) AS c FROM drafts GROUP BY status'),
@@ -20,7 +21,6 @@ export function createDraftRepo(db) {
         sent_at = COALESCE(@sent_at, sent_at),
         error = @error,
         edited_reply = COALESCE(@edited_reply, edited_reply),
-        outbound_request_id = COALESCE(@outbound_request_id, outbound_request_id),
         sent_teams_message_id = COALESCE(@teams_message_id, sent_teams_message_id)
       WHERE id = @id AND status IN (SELECT value FROM json_each(@expected))
     `),
@@ -44,7 +44,6 @@ export function createDraftRepo(db) {
       sent_at: toFields.sentAt ?? null,
       error: toFields.error ?? null,
       edited_reply: toFields.editedReply ?? null,
-      outbound_request_id: toFields.outboundRequestId ?? null,
       teams_message_id: toFields.teamsMessageId ?? null,
     });
     return info.changes > 0;
@@ -68,6 +67,9 @@ export function createDraftRepo(db) {
     findActiveForSource(sourceMessageId) {
       return stmts.bySource.get(sourceMessageId);
     },
+    hasDraftForSource(sourceMessageId) {
+      return !!stmts.anyForSource.get(sourceMessageId);
+    },
     listByStatus(status) {
       return stmts.list.all(status);
     },
@@ -82,10 +84,9 @@ export function createDraftRepo(db) {
     },
     // claim for sending (pending|edited|failed -> sending). Idempotent guard
     // against double-send; only explicit approval/retry actions reach here.
-    claimForSending(id, requestId = null) {
+    claimForSending(id) {
       return transition(id, [...ACTIVE_STATUSES, 'failed'], {
         status: 'sending',
-        outboundRequestId: requestId,
       });
     },
     markSent(id, { sentAt = new Date().toISOString(), teamsMessageId = null } = {}) {

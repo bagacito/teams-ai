@@ -9,6 +9,12 @@ services:
       - "3000:3000"   # remove/limit if you proxy via reverse proxy only
     volumes:
       - ./data:/app/data
+      # msteams-mcp checkout (built on the host: npm install && npm run build).
+      # Read-only: the app only runs its CLI against it.
+      - ${MSTEAMS_MCP_PATH_HOST:-/opt/msteams-mcp}:/opt/msteams-mcp:ro
+      # Teams browser session (SENSITIVE credentials). Persisted outside the
+      # image; created/refreshed by the manual login step on the host.
+      - ./teams-session:/app/teams-session
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
       interval: 30s

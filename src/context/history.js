@@ -2,7 +2,7 @@ import { logger } from '../logging.js';
 
 // Builds recent-message context for prompt construction.
 // Limited by RECENT_MESSAGE_COUNT (default 20) — never unlimited history.
-// History comes only from messages stored via the Power Automate bridge.
+// History comes only from messages stored via the Teams ingestion pipeline.
 
 export async function getRecentMessages(chatId, limit, messageRepo) {
   const max = Number(limit) || Number(process.env.RECENT_MESSAGE_COUNT) || 20;

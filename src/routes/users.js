@@ -8,7 +8,21 @@ const addUserSchema = z.object({
 });
 
 export function registerUserRoutes(app, ctx) {
-  const { userRepo } = ctx.repos;
+  const { userRepo, messageRepo } = ctx.repos;
+
+  // Senders actually seen in stored messages but not yet allowed. This is how
+  // the admin learns about real senders without any directory-wide search.
+  function knownSenders() {
+    const rows = ctx.db.prepare(`
+      SELECT sender_id, MAX(sender_name) AS sender_name, COUNT(*) AS messages
+      FROM messages
+      WHERE sender_id != '' AND is_me = 0
+      GROUP BY sender_id
+      ORDER BY messages DESC
+      LIMIT 50
+    `).all();
+    return rows.filter((r) => !userRepo.getByEntraId(r.sender_id));
+  }
 
   app.get('/users', async (req, reply) => {
     const users = userRepo.list();
@@ -32,6 +46,25 @@ export function registerUserRoutes(app, ctx) {
       )
       .join('');
 
+    const known = knownSenders();
+    const knownRows = known
+      .map(
+        (s) => `<tr>
+        <td>${esc(s.sender_id)}</td>
+        <td>${esc(s.sender_name)}</td>
+        <td>${esc(String(s.messages))}</td>
+        <td class="row-actions">
+          <form method="post" action="/users/allow-known" class="inline">
+            <input type="hidden" name="_csrf" value="__CSRF__">
+            <input type="hidden" name="entra_user_id" value="${esc(s.sender_id)}">
+            <input type="hidden" name="display_name" value="${esc(s.sender_name)}">
+            <button class="btn small" type="submit">Allow</button>
+          </form>
+        </td>
+      </tr>`,
+      )
+      .join('');
+
     const body = `
     <h1>Allowed users</h1>
     <div class="card">
@@ -41,6 +74,17 @@ export function registerUserRoutes(app, ctx) {
         ${rows || '<tr><td colspan="4" class="muted">No users yet.</td></tr>'}
       </table>
     </div>
+    ${
+      known.length
+        ? `<div class="card">
+      <h2>Known senders (seen in messages, not yet allowed)</h2>
+      <table>
+        <tr><th>User ID</th><th>Name</th><th>Messages</th><th></th></tr>
+        ${knownRows}
+      </table>
+    </div>`
+        : ''
+    }
     <div class="card">
       <h2>Add user</h2>
       <form method="post" action="/users">
@@ -68,6 +112,21 @@ export function registerUserRoutes(app, ctx) {
     userRepo.add(parsed.data.entra_user_id, parsed.data.display_name);
     ctx.logger.info({ userId: parsed.data.entra_user_id }, 'allowed user added');
     setFlash(req, 'User added.');
+    return reply.redirect('/users');
+  });
+
+  app.post('/users/allow-known', async (req, reply) => {
+    const id = String(req.body?.entra_user_id ?? '').trim().slice(0, 200);
+    const name = String(req.body?.display_name ?? '').trim().slice(0, 200);
+    if (!id) {
+      setFlash(req, 'Missing user id.', 'error');
+      return reply.redirect('/users');
+    }
+    if (!userRepo.getByEntraId(id)) {
+      userRepo.add(id, name);
+      ctx.logger.info({ userId: id }, 'known sender added to allowed users');
+    }
+    setFlash(req, 'Sender allowed.');
     return reply.redirect('/users');
   });
 

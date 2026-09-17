@@ -6,46 +6,81 @@ import { fileURLToPath } from 'node:url';
 import { generateDraft } from '../src/ai/draft.js';
 import { createNotifier } from '../src/notifications/notifier.js';
 import { formatNotification } from '../src/notifications/ntfy.js';
-import { buildOutboundPayload, parseOutboundResponse } from '../src/integrations/power-automate/schemas.js';
-import { makeCtx, inboundPayload, seed, ingest } from './helpers.js';
+import { makeCtx, seed, ingest } from './helpers.js';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-test('safety boundary: only routes/drafts.js may import the outbound sender module', () => {
-  const offenders = [];
+function readSrcFiles() {
+  const files = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === 'node_modules' || entry.name === 'test') continue;
+        if (entry.name === 'node_modules') continue;
         walk(full);
       } else if (entry.name.endsWith('.js') || entry.name.endsWith('.mjs')) {
-        const text = fs.readFileSync(full, 'utf8');
-        if (/power-automate\/outbound(\.js)?['"]/.test(text) && !full.includes(`${path.sep}routes${path.sep}`)) {
-          offenders.push(path.relative(ROOT, full));
-        }
+        files.push({ rel: path.relative(ROOT, full), full, text: fs.readFileSync(full, 'utf8') });
       }
     }
   };
   walk(path.join(ROOT, 'src'));
-  // server.js may only ASSIGN the sender into ctx, not call it in the pipeline.
-  assert.deepEqual(offenders.filter((f) => !f.endsWith('server.js')), []);
+  return files;
+}
+
+test('safety boundary: ctx.sendTeamsMessage is only wired in server.js and consumed in routes/drafts.js', () => {
+  for (const f of readSrcFiles()) {
+    const usesSend = /sendTeamsMessage/.test(f.text);
+    const allowed = ['src/server.js', 'src/routes/drafts.js'].includes(f.rel);
+    if (usesSend && !allowed) {
+      assert.fail(`${f.rel} references sendTeamsMessage; only server.js (wiring) and routes/drafts.js (approval) may`);
+    }
+  }
 });
 
-test('safety boundary: server only wires outbound into ctx, pipeline gets no sender', () => {
+test('safety boundary: provider sendMessage is never called outside the provider boundary', () => {
+  for (const f of readSrcFiles()) {
+    // Provider modules and the interface may define/invoke sendMessage; the
+    // application must go through ctx.sendTeamsMessage instead.
+    if (f.rel.startsWith('src/teams/')) continue;
+    const callsSendMessage = /\.sendMessage\(/.test(f.text);
+    const definesProvider = /createTeamsProvider|createMsTeamsMcpProvider/.test(f.text) && f.rel === 'src/server.js';
+    if (callsSendMessage && !definesProvider && f.rel !== 'src/server.js') {
+      assert.fail(`${f.rel} calls .sendMessage() directly; use ctx.sendTeamsMessage`);
+    }
+  }
+});
+
+test('safety boundary: AI module and pipeline have no Teams send capability', () => {
+  const pipeline = fs.readFileSync(path.join(ROOT, 'src/pipeline/ingest.js'), 'utf8');
+  assert.doesNotMatch(pipeline, /sendMessage|sendTeamsMessage|teamsProvider|provider\.js/);
+  for (const name of ['src/ai/draft.js', 'src/ai/client.js', 'src/ai/prompt.js', 'src/ai/style.js']) {
+    const text = fs.readFileSync(path.join(ROOT, name), 'utf8');
+    assert.doesNotMatch(text, /sendMessage|sendTeamsMessage|teamsProvider/, name);
+  }
+});
+
+test('safety boundary: poller never sends to Teams', () => {
+  const poller = fs.readFileSync(path.join(ROOT, 'src/teams/poller.js'), 'utf8');
+  assert.doesNotMatch(poller, /sendMessage\(/);
+  // The poller receives the provider but the interface docs forbid send use.
+  assert.match(poller, /SAFETY/);
+});
+
+test('safety boundary: server wires the send path into ctx exactly once, pipeline gets no sender', () => {
   const server = fs.readFileSync(path.join(ROOT, 'src/server.js'), 'utf8');
-  assert.match(server, /sendOutbound = createOutboundSender\(\)\.sendReply/);
+  assert.match(server, /sendTeamsMessage/);
+  assert.match(server, /teamsProvider\.sendMessage/);
   assert.doesNotMatch(server, /createIngestionPipeline\(\{[\s\S]*?send/i);
   const pipeline = fs.readFileSync(path.join(ROOT, 'src/pipeline/ingest.js'), 'utf8');
-  assert.doesNotMatch(pipeline, /sendOutbound|sendReply|createOutboundSender|power-automate\/outbound/);
+  assert.doesNotMatch(pipeline, /sendTeamsMessage|sendMessage/);
 });
 
-test('AI draft generation never triggers an outbound request', async () => {
+test('AI draft generation never triggers a Teams send', async () => {
   const ctx = makeCtx();
   seed(ctx, { aliceAllowed: true });
-  const before = ctx.outboundCalls.length;
+  const before = ctx.teamsSends.length;
   await ingest(ctx);
-  assert.equal(ctx.outboundCalls.length, before); // no outbound during ingestion
+  assert.equal(ctx.teamsSends.length, before); // no send during ingestion
   assert.equal(ctx.notifications.length, 1); // but a notification fired
 });
 
@@ -94,21 +129,6 @@ test('prompt contains all 8 context layers, history is capped', async () => {
   assert.match(user, /QUESTION\?/);
   assert.match(user, /m30/); // within last 20
   assert.doesNotMatch(user, /\bm10\b/); // older than 20 not included
-});
-
-test('outbound payload builder + response contract', () => {
-  const payload = buildOutboundPayload({
-    requestId: 'r1', draftId: 7, chatId: 'c1', replyToMessageId: 'p1', messageText: 'hi',
-  });
-  assert.deepEqual(payload, {
-    requestId: 'r1', draftId: 7, chatId: 'c1', replyToMessageId: 'p1', messageText: 'hi',
-  });
-  assert.ok(parseOutboundResponse({ success: true, teamsMessageId: 't-1' }).ok);
-  const fail = parseOutboundResponse({ success: false, error: 'nope' });
-  assert.equal(fail.ok, false);
-  assert.equal(fail.error, 'nope');
-  const bad = parseOutboundResponse({ hello: true });
-  assert.equal(bad.ok, false);
 });
 
 test('notifications: minimal mode hides message contents', () => {

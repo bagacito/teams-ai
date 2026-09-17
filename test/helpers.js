@@ -9,15 +9,64 @@ import { createSummaryRepo } from '../src/db/repositories/summaries.js';
 import { createEventRepo } from '../src/db/repositories/events.js';
 import { createSettingsRepo } from '../src/db/repositories/settings.js';
 import { createAdminAuthRepo } from '../src/db/repositories/admin-auth.js';
+import { createPollStateRepo } from '../src/db/repositories/poll-state.js';
 import { createIngestionPipeline } from '../src/pipeline/ingest.js';
 import { createApp } from '../src/app.js';
+import { createPoller } from '../src/teams/poller.js';
 
 export const ME = 'me-user-id';
 export const ME_EMAIL = 'me@company.com';
 export const ALICE = 'alice-user-id';
 export const CHAT1 = 'chat-1-id';
 export const CHAT2 = 'chat-2-id';
-export const SECRET = 'test-inbound-secret';
+export const SECRET = 'test-secret';
+
+// ── Fake TeamsProvider (never touches the network or a real login) ──────────
+export function createFakeTeamsProvider(ctx) {
+  const provider = {
+    name: 'fake',
+    // Configurable test fixtures:
+    chats: [], // { id, title, type, lastMessage: { senderName, content, timestamp, id? } }
+    messages: {}, // chatId -> [normalizedMessage]
+    // Configurable behaviours:
+    statusFn: null,
+    getMessagesFn: null,
+    listChatsError: null,
+    // Call log:
+    calls: { status: 0, listChats: 0, getMessages: {}, sendMessage: [] },
+
+    async status() {
+      provider.calls.status += 1;
+      if (provider.statusFn) return provider.statusFn();
+      return { ok: true, authenticated: true, loginRequired: false, error: null };
+    },
+    async getCurrentUser() {
+      return { ok: true, user: { id: ME, displayName: 'Me', email: ME_EMAIL } };
+    },
+    async listChats({ limit = 100 } = {}) {
+      provider.calls.listChats += 1;
+      if (provider.listChatsError) return provider.listChatsError;
+      return { ok: true, chats: provider.chats.slice(0, limit) };
+    },
+    async getChat(chatId) {
+      const chat = provider.chats.find((c) => c.id === chatId);
+      return chat ? { ok: true, chat } : { ok: false, error: 'not found' };
+    },
+    async getMessages(chatId) {
+      provider.calls.getMessages[chatId] = (provider.calls.getMessages[chatId] ?? 0) + 1;
+      if (provider.getMessagesFn) return provider.getMessagesFn(chatId);
+      return { ok: true, messages: provider.messages[chatId] ?? [] };
+    },
+    async sendMessage(chatId, text, { replyToMessageId = null } = {}) {
+      provider.calls.sendMessage.push({ chatId, replyToMessageId, messageText: text });
+      if (ctx.teamsSendShouldFail) {
+        return { ok: false, teamsMessageId: null, error: ctx.teamsSendError ?? 'send failed', errorType: ctx.teamsSendErrorType ?? 'PROVIDER_ERROR' };
+      }
+      return { ok: true, teamsMessageId: `sent-${provider.calls.sendMessage.length}`, error: null };
+    },
+  };
+  return provider;
+}
 
 export function makeCtx() {
   const db = new Database(':memory:');
@@ -34,6 +83,7 @@ export function makeCtx() {
     eventRepo: createEventRepo(db),
     settingsRepo: createSettingsRepo(db),
     adminAuthRepo: createAdminAuthRepo(db),
+    pollStateRepo: createPollStateRepo(db),
   };
 
   const ctx = {
@@ -41,34 +91,28 @@ export function makeCtx() {
     repos,
     myUserId: ME,
     myEmail: ME_EMAIL,
-    inboundSecret: SECRET,
     sessionSecret: 'test-session-secret-at-least-32-chars-long!!',
     logger: {
       child: () => ctx.logger,
       info() {}, warn() {}, error() {}, debug() {},
     },
-    outboundCalls: [],
     notifications: [],
     generated: 0,
   };
 
-  // Mock outbound Power Automate sender: records calls, never touches network.
-  ctx.sendOutbound = async ({ draftId, chatId, replyToMessageId, messageText, dryRun }) => {
-    ctx.outboundCalls.push({ draftId, chatId, replyToMessageId, messageText, dryRun });
-    if (ctx.outboundShouldFail) {
-      return { ok: false, httpStatus: ctx.outboundFailStatus ?? 500, teamsMessageId: null, error: ctx.outboundFailError ?? 'flow failed', requestId: 'req-x' };
-    }
-    return { ok: true, httpStatus: 200, teamsMessageId: `sent-${ctx.outboundCalls.length}`, error: null, requestId: `req-${ctx.outboundCalls.length}` };
-  };
+  ctx.teamsProvider = createFakeTeamsProvider(ctx);
 
-  // Mock notifier.
+  // The ONLY send path (mirrors server.js wiring); consumed by routes/drafts.js.
+  ctx.teamsSends = ctx.teamsProvider.calls.sendMessage;
+  ctx.sendTeamsMessage = ({ chatId, replyToMessageId, messageText }) =>
+    ctx.teamsProvider.sendMessage(chatId, messageText, { replyToMessageId });
+
   ctx.notifier = {
     notifyNewDraft: async (draft) => {
       ctx.notifications.push(draft.id);
     },
   };
 
-  // Mock AI generation.
   ctx.generate = async ({ context }) => {
     ctx.generated += 1;
     ctx.lastContext = context;
@@ -89,36 +133,74 @@ export function makeCtx() {
     notifier: ctx.notifier,
     myUserId: ME,
     myEmail: ME_EMAIL,
-    generate: ctx.generate,
+    // Late-binding: tests may reassign ctx.generate.
+    generate: (args) => ctx.generate(args),
   });
+
+  ctx.createPollerForCtx = () => createPoller({ ctx, provider: ctx.teamsProvider });
 
   return ctx;
 }
 
-// Standard Power Automate inbound payload.
-export function inboundPayload(overrides = {}) {
+// ── Record/poll fixtures ─────────────────────────────────────────────────────
+let eventCounter = 0;
+
+// Normalized provider message with pipeline-record defaults.
+export function makeRecord(overrides = {}) {
+  const n = ++eventCounter;
   return {
-    eventId: overrides.eventId ?? 'evt-1',
-    messageId: overrides.messageId ?? 'msg-1',
+    eventId: overrides.eventId ?? `evt-${n}`,
+    teamsMessageId: overrides.messageId ?? overrides.teamsMessageId ?? `msg-${n}`,
     chatId: overrides.chatId ?? CHAT1,
-    chatName: overrides.chatName ?? 'Project Alpha',
     senderId: overrides.senderId ?? ALICE,
     senderName: overrides.senderName ?? 'Alice',
     senderEmail: overrides.senderEmail ?? 'alice@company.com',
-    messageText: overrides.messageText ?? 'Can you review my PR?',
+    content: overrides.content ?? overrides.messageText ?? 'Can you review my PR?',
     messageType: overrides.messageType ?? 'message',
+    replyTo: overrides.replyTo ?? overrides.replyToMessageId ?? null,
+    isMe: overrides.isMe ?? false,
+    mentionsMe: overrides.mentionsMe ?? false,
+    chatName: overrides.chatName ?? 'Project Alpha',
     timestamp: overrides.timestamp ?? '2026-09-17T15:00:00Z',
-    replyToMessageId: overrides.replyToMessageId ?? null,
-    mentionedMe: overrides.mentionedMe ?? false,
   };
 }
 
-// Run a payload through the pipeline directly (non-HTTP path).
+// Run one record through the pipeline directly (non-poller path).
 export async function ingest(ctx, overrides = {}) {
-  const { recordFromPayload } = await import('../src/pipeline/ingest.js');
-  const payload = inboundPayload(overrides);
-  const record = recordFromPayload(payload, { myUserId: ME, myEmail: ME_EMAIL });
-  return ctx.pipeline.processMessage(record, { eventId: payload.eventId });
+  const record = makeRecord(overrides);
+  return ctx.pipeline.processMessage(record, { eventId: record.eventId });
+}
+
+// Normalized provider message as the (fake) provider returns it.
+export function providerMessage(overrides = {}) {
+  const n = ++eventCounter;
+  return {
+    id: overrides.id ?? `msg-${n}`,
+    chatId: overrides.chatId ?? CHAT1,
+    senderId: overrides.senderId ?? ALICE,
+    senderName: overrides.senderName ?? 'Alice',
+    senderEmail: overrides.senderEmail ?? 'alice@company.com',
+    content: overrides.content ?? 'Can you review my PR?',
+    createdAt: overrides.createdAt ?? overrides.timestamp ?? '2026-09-17T15:00:00Z',
+    replyToMessageId: overrides.replyToMessageId ?? null,
+    isFromMe: overrides.isFromMe ?? false,
+    rawType: overrides.rawType ?? 'message',
+  };
+}
+
+// Default poller fixture: one chat (Alice + Me participants) with one fresh
+// message from Alice. Relevant to the poller via Alice's allowed-user id.
+export function seedPoller(ctx, { chat = CHAT1, messages } = {}) {
+  ctx.teamsProvider.chats = [
+    {
+      id: chat,
+      title: 'Project Alpha',
+      type: 'chat',
+      participants: [ALICE, ME],
+      lastMessage: { senderName: 'Alice', content: 'Can you review my PR?', timestamp: '2026-09-17T15:00:00Z', id: 'msg-1' },
+    },
+  ];
+  ctx.teamsProvider.messages = { [chat]: messages ?? [providerMessage({ id: 'msg-1' })] };
 }
 
 export function seed(ctx, { aliceAllowed = true, chatAllowed = false } = {}) {

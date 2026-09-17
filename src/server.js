@@ -10,10 +10,12 @@ import { createSummaryRepo } from './db/repositories/summaries.js';
 import { createEventRepo } from './db/repositories/events.js';
 import { createSettingsRepo } from './db/repositories/settings.js';
 import { createAdminAuthRepo } from './db/repositories/admin-auth.js';
+import { createPollStateRepo } from './db/repositories/poll-state.js';
 import { logger } from './logging.js';
 import { createNotifier } from './notifications/notifier.js';
 import { createIngestionPipeline } from './pipeline/ingest.js';
-import { createOutboundSender } from './integrations/power-automate/outbound.js';
+import { createTeamsProvider } from './teams/provider.js';
+import { createPoller } from './teams/poller.js';
 import { createApp } from './app.js';
 import { refreshSummary } from './routes/drafts.js';
 import { summaryTriggerCount } from './context/summaries.js';
@@ -31,6 +33,7 @@ export function buildContext({ dataDir } = {}) {
     eventRepo: createEventRepo(db),
     settingsRepo: createSettingsRepo(db),
     adminAuthRepo: createAdminAuthRepo(db),
+    pollStateRepo: createPollStateRepo(db),
   };
   repos.adminAuthRepo.ensureInitialized(process.env.ADMIN_PASSWORD);
 
@@ -49,12 +52,17 @@ export function buildContext({ dataDir } = {}) {
     logger,
     myUserId: settingsRepo.get('my_user_id') || null,
     myEmail: settingsRepo.get('my_email') || null,
-    inboundSecret: process.env.POWER_AUTOMATE_INBOUND_SECRET || null,
     dataDir: path.resolve(dir),
   };
 
   ctx.notifier = createNotifier({});
-  ctx.sendOutbound = createOutboundSender().sendReply;
+
+  // Teams provider — the ONLY Teams boundary. ctx.sendTeamsMessage is the
+  // single send path and is consumed exclusively by routes/drafts.js. The
+  // ingestion pipeline and AI module never receive a provider reference.
+  ctx.teamsProvider = createTeamsProvider({ logger });
+  ctx.sendTeamsMessage = ({ chatId, replyToMessageId = null, messageText }) =>
+    ctx.teamsProvider.sendMessage(chatId, messageText, { replyToMessageId });
 
   ctx.pipeline = createIngestionPipeline({
     eventRepo: repos.eventRepo,
@@ -71,6 +79,9 @@ export function buildContext({ dataDir } = {}) {
     logger,
   });
 
+  // Poller is created in start() so tests can wire a fake provider instead.
+  ctx.createPollerForCtx = () => createPoller({ ctx, provider: ctx.teamsProvider });
+
   return ctx;
 }
 
@@ -81,6 +92,14 @@ export async function start() {
   await app.listen({ port, host: '0.0.0.0' });
   logger.info({ port }, 'teams-ai-assistant started');
 
+  // Teams poller: starts only when Teams is authenticated; otherwise stays
+  // idle and reports auth-required (the app must remain usable).
+  ctx.poller = ctx.createPollerForCtx();
+  await ctx.poller.start();
+  if (!ctx.poller.status().running) {
+    logger.warn('Teams poller not running (not authenticated or paused)');
+  }
+
   // Background worker: draft expiry + summaries.
   const expiryHours = Number(process.env.DRAFT_EXPIRY_HOURS) || 12;
   const worker = setInterval(() => runWorkerCycle(ctx, { expiryHours }), 5 * 60_000);
@@ -88,6 +107,7 @@ export async function start() {
 
   const shutdown = async () => {
     clearInterval(worker);
+    ctx.poller?.stop();
     await app.close();
     process.exit(0);
   };

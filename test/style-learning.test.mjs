@@ -50,7 +50,7 @@ test('rejected draft never becomes a style example', async () => {
 test('failed send does not create style example', async () => {
   const ctx = makeCtx();
   const draft = await createPendingDraft(ctx);
-  ctx.outboundShouldFail = true;
+  ctx.teamsSendShouldFail = true;
   await sendApprovedDraft(ctx, draft, { edited: false });
   assert.equal(ctx.repos.styleRepo.count(), 0);
 });

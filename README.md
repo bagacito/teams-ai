@@ -1,419 +1,280 @@
 # teams-ai-assistant
 
-A self-hosted Node.js service that watches selected Microsoft Teams chats
-(bridged by **Power Automate**) and drafts suggested replies with an internal
-OpenAI-compatible AI API (PDM.AI). **Nothing is ever sent to Teams
-automatically** — every AI reply is stored as a pending draft that you must
-explicitly approve, edit, or reject in the web UI.
+A self-hosted assistant that watches selected Microsoft Teams chats, drafts
+suggested replies with an internal OpenAI-compatible AI API (**PDM.AI**), and
+lets you review them in a small admin UI before anything is sent.
 
 ```
 Microsoft Teams
-  → Power Automate flow (inbound)      you build this flow
-  → HTTPS POST /api/power-automate/inbound
-  → validate shared secret + payload
-  → allowlist (allowed sender OR allowed group chat)
-  → load context / history / style
-  → generate draft with PDM.AI
-  → store as pending + ntfy notification        ← STOPS HERE
-  → you approve/edit/reject in the web UI
-  → app calls Power Automate flow (outbound)    ← only after approval
-  → flow posts the reply to Microsoft Teams
+   ↕  (browser-session APIs via local msteams-mcp)
+local Teams MCP/CLI adapter
+   ↕
+TeamsProvider abstraction  ← the ONLY Teams boundary in this app
+   ↕
+teams-ai-assistant (Fastify + SQLite)   →  pending draft  →  ntfy notification
+                                                          →  YOU approve  →  reply sent
 ```
 
-## Core safety rule
-
-> NO AI-GENERATED MESSAGE MAY BE SENT TO TEAMS WITHOUT EXPLICIT HUMAN APPROVAL.
-
-Enforced structurally, not by prompt instructions:
-
-- `src/ai/*` and the ingestion pipeline (`src/pipeline/ingest.js`) produce
-  **reply text only** and store it as a `pending` draft. They contain no
-  reference to any outbound sender.
-- `src/integrations/power-automate/outbound.js` (the only Teams-sending
-  module) is wired **exclusively** into the approval flow
-  (`src/routes/drafts.js` → `sendApprovedDraft`).
-- A static test (`test/safety.test.mjs`) fails the build if any other module
-  imports the outbound sender, or if the pipeline ever receives one.
-- The outbound flow itself is only called with a `requestId` fixed at claim
-  time; double-clicks and retries cannot send twice.
+> **Central security guarantee: NO message is ever sent to Microsoft Teams
+> without explicit human approval in the admin UI.** The ingestion pipeline,
+> the AI module and the poller have no send capability at all; the send path is
+> wired exclusively into the approval routes and enforced by static tests
+> (`test/safety.test.mjs`).
 
 ## Architecture
 
-| Path | Purpose |
-| --- | --- |
-| `src/integrations/power-automate/inbound.js` | Authenticated `POST /api/power-automate/inbound` endpoint |
-| `src/integrations/power-automate/schemas.js` | Zod schemas: inbound payload, outbound payload, response contract |
-| `src/integrations/power-automate/signature.js` | Timing-safe Bearer secret verification |
-| `src/integrations/power-automate/outbound.js` | Calls the outbound flow (timeout, idempotency, dryRun test) |
-| `src/pipeline/ingest.js` | Dedupe → allowlist → save message → `shouldDraft()` → PDM.AI → pending draft |
-| `src/ai/client.js` | Reusable OpenAI-compatible client (custom baseURL/model) |
-| `src/ai/draft.js`, `prompt.js`, `style.js` | Prompt assembly and draft generation |
-| `src/policy/allowlist.js` | Allowed user / allowed chat rules (isolated) |
-| `src/policy/should-draft.js` | Response-worthiness heuristics (isolated, AI-classifiable later) |
-| `src/context/*` | Capped recent history, factual conversation summaries, chat context |
-| `src/notifications/*` | Provider abstraction; ntfy implemented (minimal/full detail) |
-| `src/db/*` | better-sqlite3 schema, migrations, repositories |
-| `src/routes/*` + `src/views/layout.js` | Fastify server-rendered admin/approval UI, sessions, CSRF |
+- **TeamsProvider abstraction** (`src/teams/provider.js`): every Teams
+  interaction goes through this interface (`status()`, `getCurrentUser()`,
+  `listChats()`, `getChat()`, `getMessages()`, `sendMessage()`).
+- **msteams-mcp provider** (`src/teams/providers/msteams-mcp.js`): the current
+  implementation drives the local [`msteams-mcp`](https://github.com/hickeroar/msteams-mcp)
+  project through its CLI. It uses your normal Teams **browser session**
+  (no Azure/Entra app registration, no MSAL, no Graph).
+- **Poller** (`src/teams/poller.js`): polls Teams every
+  `TEAMS_POLL_INTERVAL_SECONDS` (default 60), keeps a per-chat cursor
+  (`chat_poll_state` table), skips unchanged chats, deduplicates by Teams
+  message ID, and feeds new messages into the draft pipeline.
+- **Everything else unchanged**: PDM.AI drafting, chat context/history, rolling
+  summaries, style learning, SQLite storage, ntfy notifications, approval UI,
+  admin auth.
 
-## First run: quick start
+### Why the isolation?
 
-Complete setup in this order. Variables marked **required** must be filled
-before the app is useful.
+The msteams-mcp adapter uses **undocumented Microsoft Teams web APIs**. They
+can change or break at any time. All provider-specific knowledge (CLI tool
+names, payload shapes, session handling) is contained in
+`src/teams/providers/msteams-mcp.js` and normalized in
+`src/teams/normalize.js`. To replace Teams access later (e.g. with documented
+Microsoft Graph), implement another provider module with the same six methods
+and register it in `src/teams/provider.js` — nothing else in the application
+changes.
 
-### 1. Fill `.env`
+> **Warning:** the current Teams integration relies on undocumented Teams APIs
+> used by the Teams web client. It is **unsupported** by Microsoft and may
+> break when Microsoft changes these APIs. This is distinct from the
+> documented Microsoft Graph API, which would be the supported (but
+> registration-requiring) alternative.
 
-```bash
-cp .env.example .env
-```
+## Teams integration setup (first run)
 
-| Variable | Required | What to put in it |
-| --- | --- | --- |
-| `ADMIN_PASSWORD` | **yes** | Long random passphrase, **min 16 chars** (e.g. `openssl rand -base64 24`). Read once on first boot, then hashed into the DB. |
-| `PDM_AI_API_KEY` | **yes** | API key for the internal AI router. |
-| `PDM_AI_BASE_URL` | pre-filled | `https://router.ai.pdmfc.com/v1` — keep unless your router differs. |
-| `PDM_AI_MODEL` | pre-filled | `DeepSeek-V4.1-Flash` — keep unless told otherwise. |
-| `POWER_AUTOMATE_INBOUND_SECRET` | **yes** | Long random string (e.g. `openssl rand -hex 32`). Paste the **same value** into your inbound Power Automate flow (step 3). |
-| `POWER_AUTOMATE_OUTBOUND_URL` | yes, at step 4 | URL of your "send reply" Power Automate flow (created in step 4). |
-| `POWER_AUTOMATE_OUTBOUND_SECRET` | yes, at step 4 | Long random string shared with the outbound flow. |
-| `PUBLIC_BASE_URL` | **yes** | Public HTTPS URL of this server (e.g. `https://teams-ai.example.com`). Needed for webhook links, notification deep-links, and secure cookies. |
-| `NTFY_URL` / `NTFY_TOPIC` / `NTFY_TOKEN` | optional | ntfy server + hard-to-guess topic (+ token if protected). Leave empty to skip notifications. |
-| `NTFY_DETAIL_MODE` | optional | `minimal` (default) or `full`. |
-| `RECENT_MESSAGE_COUNT` | optional | Recent messages fed to the AI (default 20). |
-| `DRAFT_EXPIRY_HOURS` | optional | Hours before pending drafts expire (default 12). |
-| `PORT` / `LOG_LEVEL` / `DATA_DIR` | optional | Defaults: 3000 / info / ./data. |
-
-Generate the secrets now and keep them handy — both flows need them:
+### 1. Install msteams-mcp on the host
 
 ```bash
-openssl rand -hex 32   # POWER_AUTOMATE_INBOUND_SECRET
-openssl rand -hex 32   # POWER_AUTOMATE_OUTBOUND_SECRET
-openssl rand -base64 24  # ADMIN_PASSWORD
+git clone https://github.com/hickeroar/msteams-mcp.git /opt/msteams-mcp
+cd /opt/msteams-mcp
+npm install
+npm run build        # optional; the CLI runs from source via tsx
 ```
 
-### 2. Start the app
+Requirements: Node.js 18+, Google Chrome (for the initial browser login).
+
+> The application never downloads arbitrary software at startup; you install
+> and build msteams-mcp yourself and point the app at it.
+
+### 2. Initial browser login (manual, on the host)
 
 ```bash
-docker compose up -d --build
-docker compose logs -f          # confirm: "teams-ai-assistant started"
-curl https://YOUR-DOMAIN/health # should return {"status":"ok"}
+cd /opt/msteams-mcp
+MSTEAMS_SESSION_PATH=/path/to/teams-session npm run cli -- login
 ```
 
-Open `https://YOUR-DOMAIN` (redirects to `/login`), sign in with
-`ADMIN_PASSWORD`. You only need this password once — it is hashed at rest
-afterwards and can be removed from `.env`.
+A browser opens; sign in with your normal Microsoft/Teams account. Session
+files are stored under `$MSTEAMS_SESSION_PATH/.teams-mcp-server/`
+(the app sets `HOME=$MSTEAMS_SESSION_PATH` when it calls the CLI).
 
-### 3. Create the inbound Power Automate flow (Teams → app)
+> The application never asks for or collects Microsoft credentials. Login
+> happens in a real browser, interactively, by you.
 
-Follow the full guide below ("Power Automate inbound flow"). In short:
+Re-run the same command whenever authentication expires (see
+[Troubleshooting](#troubleshooting)).
 
-1. Trigger on new Teams chat messages for the chats you want watched.
-2. HTTP POST action → `https://YOUR-DOMAIN/api/power-automate/inbound`
-   with headers `Content-Type: application/json` and
-   `Authorization: Bearer <POWER_AUTOMATE_INBOUND_SECRET>`.
-3. Body: the JSON payload documented on the `/integrations` page
-   (also shown in the full guide below).
+### 3. Point the app at it
 
-### 4. Create the outbound Power Automate flow (app → Teams)
-
-Follow the guide below ("Power Automate outbound flow"). In short:
-
-1. Instant HTTP-trigger flow ("When an HTTP request is received") that posts
-   `messageText` to the Teams chat given in `chatId` and responds
-   `{"success": true, "teamsMessageId": "..."}`.
-2. Copy the flow URL into `.env` as `POWER_AUTOMATE_OUTBOUND_URL`, set
-   `POWER_AUTOMATE_OUTBOUND_SECRET`, then:
-
-```bash
-docker compose up -d   # restart to pick up the new variables
+```env
+TEAMS_PROVIDER=msteams-mcp
+MSTEAMS_MCP_PATH=/opt/msteams-mcp        # path inside the container
+MSTEAMS_SESSION_PATH=/app/teams-session  # path inside the container
 ```
 
-3. Verify on the `/integrations` page: everything shows **configured**, then
-   click **Test outbound connection** (non-destructive `dryRun` — no Teams
-   message is posted).
+### 4. Docker volumes
 
-### 5. First message test
+`docker-compose.yml` mounts:
 
-1. In the web UI → `/users`: add yourself (Teams user ID or email) — or add
-   a test chat under `/chats` with the exact `chatId` your flow sends.
-2. From that account, post a message that needs a response (e.g.
-   "Can you test the draft flow?").
-3. Within seconds: ntfy notification (if configured) and a pending draft on
-   `/drafts` showing sender, chat, original message, AI reply.
-4. Try **Approve & Send** on a harmless chat — the reply should appear in
-   Teams. Then try **Edit → Save & Send**, and **Reject** on another.
-5. Check `/style` — the approved/edited final text now appears as a style
-   example; rejected text never does.
+| Volume | Purpose |
+|---|---|
+| `./data:/app/data` | SQLite database + app state |
+| `${MSTEAMS_MCP_PATH_HOST:-/opt/msteams-mcp}:/opt/msteams-mcp:ro` | the msteams-mcp checkout (read-only) |
+| `./teams-session:/app/teams-session` | Teams session (sensitive credentials) |
 
-### 6. Day-to-day
+Set `MSTEAMS_MCP_PATH_HOST=/opt/msteams-mcp` (host path) in `.env` if yours
+differs. Session state is never inside the Docker image.
 
-- Approve/edit/reject drafts on `/drafts` (mobile-friendly).
-- Tune per-chat context on `/chats`, global context on `/settings`.
-- Add colleagues to `/users` or whole group chats to `/chats`.
-- Integration health anytime on `/integrations`.
-- If sends fail (flow moved/renamed), the draft becomes `failed` with a
-  **Retry** button once the flow works again.
+**Note:** the msteams-mcp CLI may need a Chrome binary for some flows. The
+initial login is done on the host (step 2); if provider calls inside the
+container ever fail with browser-launch errors, extend the image:
 
-## Prerequisites
-
-- Node.js ≥ 22 (or Docker + Docker Compose on Ubuntu)
-- A Power Automate license that allows the flows below (trigger/action names
-  vary by tenant and license — adapt as needed)
-- Access to the internal AI router (`PDM_AI_BASE_URL` + API key)
-- Optional: an ntfy server for push notifications
-- A publicly reachable HTTPS URL for the inbound endpoint
-
-## Docker deployment (Ubuntu)
-
-```bash
-git clone <this repo> && cd teams-ai
-cp .env.example .env
-# edit .env:
-#   PDM_AI_API_KEY, ADMIN_PASSWORD (min 16 chars),
-#   POWER_AUTOMATE_INBOUND_SECRET  (long random string),
-#   POWER_AUTOMATE_OUTBOUND_URL + POWER_AUTOMATE_OUTBOUND_SECRET (after step 2),
-#   PUBLIC_BASE_URL, NTFY_* (optional)
-docker compose up -d --build
-docker compose logs -f
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends wget gnupg \
+ && wget -qO- https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor > /usr/share/keyrings/google.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/google.gpg] https://dl.google.com/linux/chrome/deb stable main" > /etc/apt/sources.list.d/google-chrome.list \
+ && apt-get update && apt-get install -y --no-install-recommends google-chrome-stable \
+ && rm -rf /var/lib/apt/lists/*
 ```
 
-Data (SQLite database) persists in `./data` mounted at `/app/data`. The
-server process runs as the unprivileged `node` user; the container entrypoint
-briefly runs as root only to fix the ownership of the mounted data dir
-(self-healing if the host created `./data` as root). Port 3000 is exposed
-with a healthcheck on `/health`. No Microsoft credentials live inside the
-container — only the two shared secrets and the PDM.AI key.
+### 5. Configure polling
 
-## Power Automate inbound flow (Teams → app)
-
-Create a flow that forwards every new Teams chat message to this app.
-Exact trigger and connector action names vary by tenant/license — the shape
-below is what matters.
-
-**Trigger:** a Microsoft Teams "new chat/channel message" trigger appropriate
-for your environment (e.g. a Teams trigger for messages in selected chats, or
-a polling trigger over messages). Configure it for the chats you want watched.
-
-**Actions:**
-
-1. **Extract** from the trigger output:
-   - a unique event ID (e.g. the flow run's ID or a message-ID-based value)
-   - the Teams message ID
-   - the chat/conversation ID (stable id, e.g. `19:...@thread.v2`)
-   - chat name if available
-   - sender ID (stable Microsoft user id or email)
-   - sender display name
-   - sender email if available
-   - message text (plain text)
-   - message timestamp
-   - reply-to message ID if available
-   - whether you were mentioned, if available
-
-2. **Normalize into this JSON** (compose/Parse JSON action):
-
-```json
-{
-  "eventId": "unique-event-id",
-  "messageId": "teams-message-id",
-  "chatId": "teams-chat-id",
-  "chatName": "friendly chat name",
-  "senderId": "microsoft-user-id-or-email",
-  "senderName": "display name",
-  "senderEmail": "user@company.com",
-  "messageText": "message contents",
-  "messageType": "message",
-  "timestamp": "2026-09-17T15:00:00Z",
-  "replyToMessageId": null,
-  "mentionedMe": false
-}
+```env
+TEAMS_POLL_INTERVAL_SECONDS=60   # default; hard floor 15
+TEAMS_POLL_MIN_INTERVAL_SECONDS=15
 ```
 
-3. **HTTP POST** to `${PUBLIC_BASE_URL}/api/power-automate/inbound`:
-   - `Content-Type: application/json`
-   - `Authorization: Bearer <POWER_AUTOMATE_INBOUND_SECRET>`
+Poll behaviour:
 
-4. **Treat HTTP 200 as accepted** even when the response says the message was
-   intentionally ignored (unallowed sender/chat, "thanks", reactions,
-   duplicates, your own messages). `400` = malformed payload (fix the flow's
-   JSON), `401` = wrong secret.
+- lists recent chats once per cycle and only fetches history for chats that
+  are relevant (approved chat, or a chat whose ID/participants contain an
+  approved user);
+- skips chats whose last message matches the stored cursor;
+- sorts new messages oldest→newest, deduplicates by Teams message ID;
+- your own messages are stored (for history/style) but never drafted;
+- one chat failing does not stop the others; repeated provider failures back
+  off exponentially (up to 10 minutes).
 
-The app deduplicates on both `eventId` (retries) and `messageId` (double
-delivery) and answers 200 for duplicates — safe to retry.
+Only one poll runs at a time; overlapping triggers (e.g. **Poll now** during
+an active poll) are skipped.
 
-## Power Automate outbound flow (app → Teams)
+### 6. Discover chats and approve users
 
-Create a second flow that posts the approved reply.
+- **Chats** (`/chats` → **Discover Teams chats**): lists recent Teams
+  conversations with title, ID, participants and last activity. Click
+  **Add to approved chats** — no more copying opaque chat IDs.
+- **Users** (`/users`): senders actually seen in stored messages appear under
+  **Known senders**; click **Allow** to add them.
 
-1. **Trigger:** *When an HTTP request is received* (instant HTTP trigger).
-   Note the generated URL → `POWER_AUTOMATE_OUTBOUND_URL`.
-2. **Validate the shared secret** in the request body/header. If your flow
-   platform cannot check an Authorization header, the safest alternative is
-   to include the secret as a required body property and have the flow
-   compare it against configured content before doing anything (terminate
-   with a non-2xx response otherwise). This app sends the secret as
-   `Authorization: Bearer <POWER_AUTOMATE_OUTBOUND_SECRET>`; add a *Compose*
-   + *Condition* step checking `triggerHeaders()['Authorization']` equals
-   `Bearer <secret>` where supported.
-3. **Request body fields:** `requestId`, `draftId`, `chatId`,
-   `replyToMessageId`, `messageText` (and `dryRun: true` for connectivity
-   tests).
-4. **If `dryRun` is true:** respond `{"success": true}` immediately without
-   posting anything (used by the /integrations connectivity test).
-5. **Post `messageText` to the Teams chat** identified by `chatId` (use a
-   Teams "post message in a chat" action).
-6. **If possible, reply to the original message** when `replyToMessageId` is
-   present (reply-in-thread action); otherwise post a normal message.
-7. **Respond** to the HTTP call:
-   - success: `{"success": true, "teamsMessageId": "<sent message id>"}`
-   - failure: non-2xx response, or `{"success": false, "error": "<safe message>"}`
+Approval semantics (unchanged): a message is eligible when its **sender is an
+approved user** OR its **chat is an approved chat** (for group chats, approving
+the chat means any participant can trigger drafting).
 
-**Idempotency:** track processed `requestId` values (e.g. persist them to a
-SharePoint list/Excel/DataVerse row and check before posting). If the app
-retries (Retry button after an ambiguous timeout), the same `requestId`
-arrives — skip posting and return the original result. The app marks a draft
-`failed` on failure and offers Retry; it never auto-retries after an
-ambiguous timeout.
+### 7. Test polling and draft approval
 
-## Approving / editing / rejecting replies (/drafts)
+1. Wait for a poll cycle (or **Integrations → Poll now**).
+2. An eligible message (question/request/mention) produces a **pending draft**
+   and an ntfy notification.
+3. In **Drafts**, choose **Approve & Send**, **Edit** (edited text is sent
+   instead and learned as a better style example), or **Reject**.
+4. The send goes through `TeamsProvider.sendMessage()` — exactly once, with an
+   atomic state transition that makes double-click retries impossible. Failed
+   sends can be retried; successful ones record the Teams message ID.
 
-- **Approve & Send** — the exact AI text goes through the outbound flow,
-  the draft is marked `sent`, recorded as your message, and becomes an
-  `approved_draft` style example.
-- **Edit** — modify the text and *Save & Send*; the edited text is what
-  Teams receives and becomes an `edited_draft` (higher-quality) example.
-- **Reject** — marked rejected; can never be sent or used for style.
-- **Retry** — for `failed` sends (outbound error/timeout).
-- **Regenerate** — for `expired` drafts (`DRAFT_EXPIRY_HOURS`, default 12):
-  creates a fresh pending draft using current conversation state.
-- Double-clicks cannot double-send: the `sending` state transition is atomic.
-
-## Adding approved people (/users)
-
-- Stable identifier (Microsoft user ID or email) + label.
-- Messages from these people are eligible wherever they write.
-- Enable/disable or remove at any time.
-
-## Adding approved group chats (/chats)
-
-- Add the chat ID (e.g. `19:abc123@thread.v2`) exactly as your inbound flow
-  sends it in `chatId`, plus a friendly name.
-- Any message in an enabled chat is eligible **regardless of participant**.
-- The **context** field is free text passed to the AI on every draft.
-
-**Authorization rule (v1):** a message is eligible if the *sender* is an
-enabled allowed user **OR** the *chat* is an enabled allowed chat. The rule
-lives in one small function in `src/policy/allowlist.js`.
-
-## Conversation context and summaries
-
-- Per-chat context: `/chats`. Global context: `/settings`.
-- Recent history fed to the AI is capped (`RECENT_MESSAGE_COUNT`, default 20).
-- Once a chat exceeds `SUMMARY_TRIGGER_MESSAGE_COUNT` (default 40) stored
-  messages, a factual summary is generated (decisions, open questions,
-  owners, dates, project state, terminology). Writing style is **never**
-  mixed into summaries; style lives only in style examples.
-
-## Managing writing-style examples (/style)
-
-| Source | Meaning |
-| --- | --- |
-| `manual` | You typed it on /style |
-| `teams` | Messages you sent yourself (substantive ones captured automatically) |
-| `approved_draft` | A draft you approved **unchanged** and was sent |
-| `edited_draft` | A draft you edited — the edited text you sent |
-
-- Rejected drafts are never used; an AI draft never becomes an example by
-  itself; nothing is silently rewritten.
-- Examples can be enabled/disabled/deleted.
-- Set *My Teams user ID / email* in `/settings` so the app recognizes your
-  own messages (ignored for drafting, captured for style).
-
-## Setting up ntfy
-
-1. Self-host ntfy or use `https://ntfy.sh`; choose a hard-to-guess topic.
-2. `NTFY_TOPIC` (+ `NTFY_TOKEN` if protected).
-3. `NTFY_DETAIL_MODE`: `minimal` (default: "New Teams reply waiting for
-   approval - Alice - Project Alpha") or `full` (includes message + draft).
-4. Notifications deep-link to `/drafts`.
-
-## Integrations status (/integrations)
-
-Shows configured/not-configured for Power Automate inbound (secret set),
-Power Automate outbound (URL + secret set), and PDM.AI — without displaying
-secret values. Also shows the exact inbound URL + required headers, a sample
-payload, and a non-destructive **Test outbound connection** button (sends
-`dryRun: true`; the flow must not post a Teams message for dry runs).
-
-## Testing draft generation
-
-1. Add an allowed user or allowed chat; ensure your inbound flow covers it.
-2. From an allowed account, post a message that needs a response.
-3. A notification arrives; `/drafts` shows sender, chat, time, original
-   message, AI reply.
-4. Logs show `power automate inbound request received`, `draft generated`,
-   and `message ignored + reason` for skipped ones (reactions, "ok"/"thanks",
-   own messages, duplicates, non-allowed, system types).
-
-## Security
-
-- Admin UI behind session auth; password hashed (scrypt) at rest on first
-  boot from `ADMIN_PASSWORD` (min 16 chars).
-- Secure/HttpOnly/SameSite cookies (secure when `PUBLIC_BASE_URL` is https);
-  login rate-limited (5/min).
-- CSRF tokens on all state-changing forms; Zod validation on all inputs
-  (including the inbound payload); HTML-escaped rendering; helmet CSP.
-- Inbound endpoint: timing-safe Bearer secret comparison; 401 on bad secret;
-  generous rate limit (240/min) so legitimate Power Automate retries pass.
-- Never logged: shared secrets, Authorization headers, API keys
-  (pino redaction + structured logs only). Full Teams conversation contents
-  are not logged by default.
-- Put the service behind HTTPS; don't expose port 3000 raw.
+The **Integrations** page shows provider status (Connected / Login required /
+Error / Disconnected), last successful poll, chats scanned, messages
+discovered, pending drafts, and **Poll now / Pause / Resume** controls. It
+never displays tokens or session content.
 
 ## Configuration reference
 
-See `.env.example`.
+| Variable | Required | Description |
+|---|---|---|
+| `PORT` | no | HTTP port (default 3000). |
+| `PUBLIC_BASE_URL` | recommended | Public URL used in notification links. |
+| `PDM_AI_BASE_URL` | yes | OpenAI-compatible API base (default `https://router.ai.pdmfc.com/v1`). |
+| `PDM_AI_API_KEY` | yes | PDM.AI key. |
+| `PDM_AI_MODEL` | no | Default `DeepSeek-V4.1-Flash`. |
+| `ADMIN_PASSWORD` | yes | Admin UI passphrase (min 16 chars, hashed at rest). |
+| `TEAMS_PROVIDER` | no | `msteams-mcp` (default, only value). |
+| `MSTEAMS_MCP_PATH` | yes (for Teams) | Path to the msteams-mcp checkout. |
+| `MSTEAMS_SESSION_PATH` | no | Session dir (default `/app/teams-session`). |
+| `TEAMS_POLL_INTERVAL_SECONDS` | no | Poll interval (default 60). |
+| `TEAMS_POLL_MIN_INTERVAL_SECONDS` | no | Hard floor (default 15). |
+| `MSTEAMS_MCP_TIMEOUT_MS` | no | Per CLI call timeout (default 90000). |
+| `NTFY_URL` / `NTFY_TOPIC` / `NTFY_TOKEN` / `NTFY_DETAIL_MODE` | no | ntfy notifications (`minimal` hides contents). |
+| `RECENT_MESSAGE_COUNT` / `SUMMARY_TRIGGER_MESSAGE_COUNT` / `DRAFT_EXPIRY_HOURS` | no | Context sizing / summary trigger / draft TTL. |
+| `DATA_DIR` | no | SQLite location (default `./data`). |
+| `LOG_LEVEL` | no | pino level. |
 
-| Variable | Purpose |
-| --- | --- |
-| `PORT` | HTTP port (3000) |
-| `PUBLIC_BASE_URL` | Public HTTPS URL (inbound URL shown in UI, notification links, secure cookies) |
-| `PDM_AI_BASE_URL` / `PDM_AI_API_KEY` / `PDM_AI_MODEL` | Internal AI router (default `DeepSeek-V4.1-Flash`, temperature 0.2) |
-| `POWER_AUTOMATE_INBOUND_SECRET` | Shared secret for inbound POSTs (`Authorization: Bearer ...`) |
-| `POWER_AUTOMATE_OUTBOUND_URL` | HTTP-trigger flow URL for approved replies |
-| `POWER_AUTOMATE_OUTBOUND_SECRET` | Shared secret sent to the outbound flow |
-| `ADMIN_PASSWORD` | Initial admin password (min 16 chars, hashed at rest) |
-| `NTFY_URL` / `NTFY_TOPIC` / `NTFY_TOKEN` / `NTFY_DETAIL_MODE` | Push notifications |
-| `RECENT_MESSAGE_COUNT` | Recent messages fed as context (default 20) |
-| `SUMMARY_TRIGGER_MESSAGE_COUNT` | Chat size before a summary is generated (default 40) |
-| `DRAFT_EXPIRY_HOURS` | Pending draft expiry (default 12) |
-| `LOG_LEVEL` | pino level |
-| `DATA_DIR` | Persistent data directory (`/app/data` in Docker) |
+Runtime settings (admin UI `/settings`): my user id/email, global context,
+capture-own-messages-style, draft expiry, summary trigger, ntfy detail mode.
 
-## Tests
+## Startup behaviour
 
-```bash
-npm test
-```
+At startup the app: initializes the database → PDM.AI client → Teams provider
+→ checks Teams authentication → starts the web server → starts the poller only
+when Teams is authenticated and polling is not paused. **If Teams is not
+authenticated the app still starts**: the admin UI, drafts and history remain
+fully usable, and polling reports "authentication required" instead of
+crashing.
 
-Covers: inbound auth (valid/invalid/missing secret), malformed payloads,
-duplicate eventId/messageId, allowlist (sender, group chat, unapproved),
-own-message detection (id or email), system/reaction filtering, the
-send-only-after-approval boundary (including a static import scan), single
-outbound call on approval, double-approval protection, edited-text sending,
-outbound failure → failed + Retry, Teams message ID persistence, style
-learning rules, prompt assembly/context capping, and ntfy privacy modes.
-PDM.AI and the outbound flow are fully mocked.
+## Security considerations
+
+- **Human-in-the-loop send**: enforced structurally and by
+  `test/safety.test.mjs` (only `routes/drafts.js` may send; the pipeline, AI
+  module and poller have no send capability).
+- **Teams session directory = credentials.** Treat `teams-session/` as you
+  would a password store:
+  - never logged, never exposed via UI/API, never committed, never in images;
+  - recommended permissions: `chmod 700 teams-session && chown -R 1000:1000 teams-session`
+    (the container's `node` user is uid 1000);
+  - excluded from backups by default (it is a plain directory outside `data/`);
+    if you must back it up, encrypt it.
+- Admin UI: session cookies (httpOnly, Secure when behind HTTPS), rotating
+  CSRF tokens, helmet CSP, rate limiting; all user/Teams content is
+  HTML-escaped.
+- Logs are pino with redaction of token/secret fields; Teams message contents
+  are not logged.
+- Raw provider payloads are not stored (storage of raw payloads is disabled by
+  default).
 
 ## Troubleshooting
 
-| Symptom | Fix |
-| --- | --- |
-| `401` in the flow | Secret mismatch: compare `POWER_AUTOMATE_INBOUND_SECRET` with the flow's Authorization header |
-| `400` in the flow | Payload shape wrong — compare with the sample on `/integrations` |
-| Drafts never appear | Check allowlists (`/users`, `/chats`); check logs for `message ignored + reason`; ensure the flow actually fires for those chats |
-| Duplicate drafts for one message | Should not happen (eventId + messageId dedupe); check `processed_events`/`messages` tables |
-| Approve fails instantly | `POWER_AUTOMATE_OUTBOUND_URL`/`SECRET` unset or wrong — check `/integrations`, use *Test outbound connection* |
-| Send marked failed with timeout | The flow may still have posted; use Retry only after checking Teams — the shared `requestId` lets an idempotent flow dedupe |
-| No notifications | Verify `NTFY_URL`/`NTFY_TOPIC`, subscribe in the ntfy app, check logs for `notification failed` |
-| `ADMIN_PASSWORD` error at boot | Must be ≥ 16 chars; only read the first time (hashed afterwards) |
-| `unable to open database file` at startup | The mounted `./data` dir is not writable by the container's `node` user (uid 1000). Current images self-heal via the entrypoint; for older builds run `sudo chown -R 1000:1000 data` on the host |
-| Outbound page shows "not configured" | Set both outbound env vars and restart the container |
+**"Login required" on the Integrations page / sends failing with auth errors**
+
+The Teams browser session expired (tokens refresh automatically while possible;
+a full expiry needs an interactive login). Fix:
+
+```bash
+cd /opt/msteams-mcp
+MSTEAMS_SESSION_PATH=./teams-session npm run cli -- login
+```
+
+(use the same session path that is mounted into the container; if the session
+is badly corrupted, `npm run cli -- login --force` starts fresh).
+
+**Poller idle although connected** — check whether polling is paused
+(Integrations → Resume) and whether any chat/user is approved.
+
+**Provider errors like "MSTEAMS_MCP_PATH is not set or invalid"** — the path
+must point at the checkout *inside the container* (`/opt/msteams-mcp`), not the
+host path; the host path goes into `MSTEAMS_MCP_PATH_HOST` for the compose
+mount.
+
+**Undocumented-API breakage** — if Teams calls suddenly fail en masse after a
+Microsoft change, check for msteams-mcp updates (`git pull && npm install &&
+npm run build`), then restart the container.
+
+## Replacing the provider later
+
+To move to documented Microsoft Graph (or anything else):
+
+1. Create `src/teams/providers/<name>.js` exporting
+   `create<Name>Provider({ logger })` implementing the six interface methods
+   and returning normalized messages (`src/teams/normalize.js`).
+2. Register it in the `createTeamsProvider()` switch in
+   `src/teams/provider.js` and add a `TEAMS_PROVIDER=<name>` value.
+3. Keep `sendMessage()` reachable only from the approval wiring in
+   `src/server.js` (the safety tests will enforce it).
+
+No changes are needed in the pipeline, poller logic, AI modules, UI or tests
+beyond the provider test fixtures.
+
+## Development
+
+```bash
+npm install
+npm test          # node --test; all tests use a fake TeamsProvider, no real login
+npm run dev
+docker compose up -d --build
+```
+
+Project layout highlights: `src/teams/` (provider + adapter + poller),
+`src/pipeline/ingest.js` (store → allowlist → shouldDraft → draft → notify,
+never sends), `src/routes/drafts.js` (approval + the single send path),
+`src/db/` (SQLite + migrations), `test/` (unit + safety-boundary tests).

@@ -1,9 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Approval routes. This module is the ONLY code wired to the outbound Power
-// Automate sender (via server.js: ctx.sendOutbound). No other code path can
+// Approval routes. This module is the ONLY code wired to TeamsProvider.
+// sendMessage (via server.js: ctx.sendTeamsMessage). No other code path can
 // send to Teams.
 // ─────────────────────────────────────────────────────────────────────────────
-import crypto from 'node:crypto';
 import { createDraftForMessage } from '../pipeline/ingest.js';
 import { summarizeChat, summaryTriggerCount } from '../context/summaries.js';
 import { replyHtml, setFlash } from './guards.js';
@@ -142,10 +141,8 @@ export async function sendApprovedDraft(ctx, draft, { edited }) {
   const draftId = draft.id;
 
   // 1) Atomic claim: pending|edited -> sending. Prevents double-send on
-  //    double-click: the second request's claim fails. The outbound requestId
-  //    is fixed at claim time so any retry reuses the same id (idempotency).
-  const requestId = crypto.randomUUID();
-  if (!draftRepo.claimForSending(draftId, requestId)) {
+  //    double-click: the second request's claim fails.
+  if (!draftRepo.claimForSending(draftId)) {
     ctx.logger.warn({ draftId }, 'send attempt on non-claimable draft');
     return { ok: false, message: `Draft #${draftId} is not sendable (state: ${draft.status}).` };
   }
@@ -157,24 +154,28 @@ export async function sendApprovedDraft(ctx, draft, { edited }) {
   }
 
   ctx.logger.info({ draftId, edited }, 'draft approved, sending');
-  // 2) Send via the outbound Power Automate flow. ctx.sendOutbound is the ONLY
-  //    send path and is set exclusively here (see server.js); tests inject a mock.
+  // 2) Send via the Teams provider. ctx.sendTeamsMessage is the ONLY send
+  //    path and is set exclusively in server.js; tests inject a fake.
   try {
     const sourceMsg = messageRepo.getById(draft.source_message_id);
-    const result = await ctx.sendOutbound({
-      requestId,
-      draftId,
+    const result = await ctx.sendTeamsMessage({
       chatId: draft.chat_id,
       replyToMessageId: sourceMsg?.reply_to ?? null,
       messageText: text,
     });
     if (!result.ok) {
-      draftRepo.markFailed(draftId, result.error ?? `outbound failed (HTTP ${result.httpStatus})`);
-      ctx.logger.warn({ draftId, requestId: result.requestId, httpStatus: result.httpStatus }, 'message send failed');
+      draftRepo.markFailed(draftId, result.error ?? 'teams send failed');
+      ctx.logger.warn({ draftId, errorType: result.errorType }, 'message send failed');
+      if (result.errorType === 'AUTH_REQUIRED') {
+        return {
+          ok: false,
+          message: `Send failed for draft #${draftId}: Teams login required (run the msteams-mcp login command).`,
+        };
+      }
       return { ok: false, message: `Send failed for draft #${draftId}: ${result.error}` };
     }
     // 3) Mark sent + record as my message + style example.
-    const teamsMessageId = result.teamsMessageId ?? `outbound-${result.requestId}`;
+    const teamsMessageId = result.teamsMessageId ?? `local-${draftId}`;
     draftRepo.markSent(draftId, { teamsMessageId });
     messageRepo.save({
       teamsMessageId,
@@ -184,9 +185,10 @@ export async function sendApprovedDraft(ctx, draft, { edited }) {
       content: text,
       messageType: 'message',
       isMe: true,
+      replyTo: sourceMsg?.reply_to ?? null,
     });
     styleRepo.add(text, edited ? 'edited_draft' : 'approved_draft', draft.chat_id);
-    ctx.logger.info({ draftId, requestId: result.requestId }, 'message send succeeded');
+    ctx.logger.info({ draftId, teamsMessageId }, 'message send succeeded');
     return { ok: true, message: `Reply sent to Teams (draft #${draftId}).` };
   } catch (err) {
     draftRepo.markFailed(draftId, err.message);

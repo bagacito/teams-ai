@@ -13,7 +13,7 @@ import { getRecentMessages, getChatContext } from '../context/chat-context.js';
 // approval.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Message record derived from a validated Power Automate inbound payload.
+// Message record derived from a validated provider message.
 export function recordFromPayload(payload, { myUserId = null, myEmail = null } = {}) {
   const senderId = payload.senderId;
   const isMe =
@@ -66,18 +66,36 @@ export function createIngestionPipeline(deps) {
     getChat: (id) => chatRepo.getByChatId(id),
   };
 
-  // Processes one validated inbound record. Returns { processed, reason, draftId }.
-  async function processMessage(record, { eventId } = {}) {
+  // Processes one normalized provider record. Returns { processed, reason, draftId }.
+  // retry=true (poller re-processing after a failure) allows regenerating a
+  // draft for an already-stored message when no draft was ever created.
+  async function processMessage(record, { eventId, retry = false } = {}) {
     const log = logger.child({ component: 'pipeline' });
 
-    // Deduplicate at event level (Power Automate retries).
-    if (!eventRepo.firstTimeSeen(eventId ?? `anon-${record.teamsMessageId}`, record.teamsMessageId)) {
+    // Defensive own-message detection (provider may not have flagged it).
+    record.isMe =
+      record.isMe === true ||
+      (myUserId && record.senderId && record.senderId === myUserId) ||
+      (myEmail && record.senderEmail && record.senderEmail.toLowerCase() === myEmail.toLowerCase());
+
+    // Deduplicate at event level (external delivery retries). Polling relies
+    // on message-id dedupe + cursors instead and passes no eventId.
+    if (eventId && !eventRepo.firstTimeSeen(eventId, record.teamsMessageId)) {
       log.info({ eventId }, 'duplicate event ignored');
       return { processed: false, reason: 'duplicate-event' };
     }
 
     // Deduplicate at message level (unique constraint + explicit check).
-    if (messageRepo.getById(record.teamsMessageId)) {
+    // A retry may regenerate when the earlier attempt never produced a draft
+    // (e.g. transient AI failure).
+    const existing = messageRepo.getById(record.teamsMessageId);
+    const canRegenerate =
+      existing &&
+      retry &&
+      !record.isMe &&
+      record.messageType === 'message' &&
+      !draftRepo.hasDraftForSource(record.teamsMessageId);
+    if (existing && !canRegenerate) {
       log.info({ messageId: record.teamsMessageId }, 'duplicate message ignored');
       return { processed: false, reason: 'duplicate-message' };
     }
@@ -112,7 +130,7 @@ export function createIngestionPipeline(deps) {
     }
 
     // Save incoming message for history (unique constraint prevents dupes).
-    const saved = messageRepo.save(record);
+    const saved = existing ? existing : messageRepo.save(record);
     if (!saved) {
       log.info({ messageId: record.teamsMessageId }, 'duplicate message ignored (constraint)');
       return { processed: false, reason: 'duplicate-message' };

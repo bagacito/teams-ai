@@ -1,93 +1,120 @@
 import { replyHtml, setFlash } from './guards.js';
 import { esc } from '../views/layout.js';
-import { isOutboundConfigured } from '../integrations/power-automate/outbound.js';
 
 export function registerIntegrationsRoutes(app, ctx) {
-  const status = (ok) =>
-    ok ? '<span class="badge sent">configured</span>' : '<span class="badge rejected">not configured</span>';
+  const { draftRepo } = ctx.repos;
 
-  const inboundConfigured = !!ctx.inboundSecret;
-  const aiConfigured = !!(process.env.PDM_AI_BASE_URL && process.env.PDM_AI_API_KEY);
-  const outboundOk = isOutboundConfigured();
+  const badge = (ok, okText = 'configured') =>
+    ok ? `<span class="badge sent">${okText}</span>` : '<span class="badge rejected">not configured</span>';
 
-  const base = (process.env.PUBLIC_BASE_URL || 'https://YOUR-DOMAIN').replace(/\/+$/, '');
-  const sample = {
-    eventId: 'pa-flow-run-00000000-0000-0000-0000-000000000000',
-    messageId: '1689000000000',
-    chatId: '19:abc123@thread.v2',
-    chatName: 'Project Alpha',
-    senderId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
-    senderName: 'Alice Example',
-    senderEmail: 'alice@company.com',
-    messageText: 'Can you review the deployment plan today?',
-    messageType: 'message',
-    timestamp: '2026-09-17T15:00:00Z',
-    replyToMessageId: null,
-    mentionedMe: false,
-  };
+  function teamsBadge(st) {
+    if (!st) return '<span class="badge rejected">unknown</span>';
+    if (st.ok && st.authenticated && !st.loginRequired) return '<span class="badge sent">Connected</span>';
+    if (st.ok && st.loginRequired) return '<span class="badge expired">Login required</span>';
+    if (st.ok && !st.authenticated) return '<span class="badge expired">Disconnected</span>';
+    return '<span class="badge rejected">Error</span>';
+  }
 
-  const body = `
-  <h1>Integrations</h1>
+  async function page(req, reply) {
+    const aiConfigured = !!(process.env.PDM_AI_BASE_URL && process.env.PDM_AI_API_KEY);
+    const providerConfigured = !!process.env.MSTEAMS_MCP_PATH;
 
-  <div class="card">
-    <h2>Status</h2>
-    <table>
-      <tr><th>Integration</th><th>State</th></tr>
-      <tr><td>Power Automate inbound (secret set)</td><td>${status(inboundConfigured)}</td></tr>
-      <tr><td>Power Automate outbound (URL + secret set)</td><td>${status(outboundOk)}</td></tr>
-      <tr><td>PDM.AI (base URL + API key set)</td><td>${status(aiConfigured)}</td></tr>
-    </table>
-    <p class="muted">Secret values are never displayed.</p>
-  </div>
+    // Never throw because of Teams problems — the page must stay usable.
+    let providerStatus = null;
+    let pollStatus = null;
+    try {
+      providerStatus = await ctx.teamsProvider.status();
+    } catch (err) {
+      providerStatus = { ok: false, authenticated: false, error: err.message };
+    }
+    pollStatus = ctx.poller ? ctx.poller.status() : null;
+    const pendingCount =
+      draftRepo.listByStatus('pending').length + draftRepo.listByStatus('edited').length;
 
-  <div class="card">
-    <h2>Inbound endpoint</h2>
-    <p>Point your Power Automate flow's HTTP action at:</p>
-    <div class="msg-bubble"><strong>POST ${esc(base)}/api/power-automate/inbound</strong><br>
-    Content-Type: application/json<br>
-    Authorization: Bearer &lt;POWER_AUTOMATE_INBOUND_SECRET&gt;</div>
-    <p class="muted">HTTP 200 means accepted (even if the message was intentionally ignored). 400 = malformed payload, 401 = bad secret.</p>
-    <h2>Sample payload</h2>
-    <div class="msg-bubble"><pre style="margin:0;white-space:pre-wrap">${esc(JSON.stringify(sample, null, 2))}</pre></div>
-  </div>
+    const lastAccess = pollStatus?.lastSuccessAt
+      ? esc(pollStatus.lastSuccessAt)
+      : '<span class="muted">never</span>';
 
-  <div class="card">
-    <h2>Outbound flow</h2>
-    <p>Set <code>POWER_AUTOMATE_OUTBOUND_URL</code> to the URL of your "send reply" flow and
-    <code>POWER_AUTOMATE_OUTBOUND_SECRET</code> to its shared secret. This app posts
-    <code>requestId</code>, <code>draftId</code>, <code>chatId</code>, <code>replyToMessageId</code>,
-    <code>messageText</code> and expects <code>{"success": true, "teamsMessageId": "..."}</code> back.</p>
-    <p class="muted">The flow must never send unless this app calls it — and this app only calls it after explicit human approval.</p>
-    <form method="post" action="/integrations/test-outbound">
-      <input type="hidden" name="_csrf" value="__CSRF__">
-      <button class="btn" type="submit">Test outbound connection</button>
-      <span class="muted">Non-destructive: sends dryRun=true, no Teams message is posted.</span>
-    </form>
-  </div>`;
+    const body = `
+    <h1>Integrations</h1>
 
-  app.get('/integrations', async (req, reply) => {
-    return replyHtml(req, reply, {
-      title: 'Integrations',
-      active: '/integrations',
-      body: injectCsrf(body, req),
-    });
+    <div class="card">
+      <h2>Teams provider</h2>
+      <table>
+        <tr><th>Component</th><th>State</th><th>Detail</th></tr>
+        <tr><td>Teams provider (${esc(ctx.teamsProvider?.name ?? 'unknown')})</td>
+            <td>${teamsBadge(providerStatus)}</td>
+            <td class="muted">${esc(providerStatus?.error ?? '')}</td></tr>
+        <tr><td>Provider CLI configured (MSTEAMS_MCP_PATH)</td><td>${badge(providerConfigured)}</td><td></td></tr>
+        <tr><td>PDM.AI (base URL + API key set)</td><td>${badge(aiConfigured)}</td><td></td></tr>
+      </table>
+      <p class="muted">Authentication status only — session/token data is never read or displayed.</p>
+    </div>
+
+    <div class="card">
+      <h2>Teams poller</h2>
+      <table>
+        <tr><th>Field</th><th>Value</th></tr>
+        <tr><td>State</td><td>${pollStatus?.running ? '<span class="badge sent">running</span>' : '<span class="badge rejected">paused</span>'}${pollStatus?.active ? ' <span class="badge pending">polling now</span>' : ''}</td></tr>
+        <tr><td>Interval</td><td>${esc(String(pollStatus?.intervalSeconds ?? '—'))}s</td></tr>
+        <tr><td>Last poll</td><td>${pollStatus?.lastPollAt ? esc(pollStatus.lastPollAt) : '<span class="muted">never</span>'}</td></tr>
+        <tr><td>Last successful poll</td><td>${lastAccess}</td></tr>
+        <tr><td>Chats scanned</td><td>${esc(String(pollStatus?.lastStats?.chatsScanned ?? 0))}</td></tr>
+        <tr><td>Messages discovered</td><td>${esc(String(pollStatus?.lastStats?.messagesDiscovered ?? 0))}</td></tr>
+        <tr><td>Last error</td><td class="muted">${esc(pollStatus?.lastError ?? 'none')}</td></tr>
+        <tr><td>Pending drafts</td><td>${esc(String(pendingCount))}</td></tr>
+      </table>
+      <div class="actions">
+        <form method="post" action="/integrations/poll-now" class="inline">
+          <input type="hidden" name="_csrf" value="__CSRF__">
+          <button class="btn primary" type="submit">Poll now</button>
+        </form>
+        <form method="post" action="/integrations/poll-pause" class="inline">
+          <input type="hidden" name="_csrf" value="__CSRF__">
+          <button class="btn" type="submit">Pause polling</button>
+        </form>
+        <form method="post" action="/integrations/poll-resume" class="inline">
+          <input type="hidden" name="_csrf" value="__CSRF__">
+          <button class="btn" type="submit">Resume polling</button>
+        </form>
+      </div>
+      <p class="muted">Interval is set via <code>TEAMS_POLL_INTERVAL_SECONDS</code> (default 60).</p>
+    </div>`;
+
+    return replyHtml(req, reply, { title: 'Integrations', active: '/integrations', body: injectCsrf(body, req) });
+  }
+
+  app.get('/integrations', page);
+
+  app.post('/integrations/poll-now', async (req, reply) => {
+    try {
+      const res = await ctx.poller.pollNow();
+      if (res.skipped) {
+        setFlash(req, 'A poll is already running — skipped.', 'error');
+      } else if (res.ok) {
+        setFlash(req, `Poll complete: ${res.stats.chatsScanned} chats scanned, ${res.stats.messagesDiscovered} new messages.`);
+      } else if (res.reason === 'auth-required') {
+        setFlash(req, 'Teams not authenticated — run the msteams-mcp login command (see README).', 'error');
+      } else {
+        setFlash(req, `Poll failed: ${res.error ?? 'provider error'}`, 'error');
+      }
+    } catch (err) {
+      setFlash(req, `Poll failed: ${err.message}`, 'error');
+    }
+    return reply.redirect('/integrations');
   });
 
-  app.post('/integrations/test-outbound', async (req, reply) => {
-    if (!outboundOk) {
-      setFlash(req, 'Outbound is not configured (POWER_AUTOMATE_OUTBOUND_URL / SECRET missing).', 'error');
-      return reply.redirect('/integrations');
-    }
-    try {
-      const result = await ctx.sendOutbound({ draftId: null, chatId: 'test', messageText: '', dryRun: true });
-      setFlash(
-        req,
-        result.ok ? 'Outbound flow reachable (dryRun).' : `Outbound test failed: ${result.error}`,
-        result.ok ? 'ok' : 'error',
-      );
-    } catch (err) {
-      setFlash(req, `Outbound test failed: ${err.message}`, 'error');
-    }
+  app.post('/integrations/poll-pause', async (req, reply) => {
+    ctx.poller?.pause();
+    ctx.logger.info('polling paused by admin');
+    setFlash(req, 'Polling paused.');
+    return reply.redirect('/integrations');
+  });
+
+  app.post('/integrations/poll-resume', async (req, reply) => {
+    ctx.poller?.resume();
+    ctx.logger.info('polling resumed by admin');
+    setFlash(req, 'Polling resumed.');
     return reply.redirect('/integrations');
   });
 }

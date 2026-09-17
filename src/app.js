@@ -12,11 +12,10 @@ import { registerUserRoutes } from './routes/users.js';
 import { registerChatRoutes } from './routes/chats.js';
 import { registerStyleRoutes } from './routes/style.js';
 import { registerSettingsRoutes } from './routes/settings.js';
-import { registerInboundEndpoint } from './integrations/power-automate/inbound.js';
 import { registerIntegrationsRoutes } from './routes/integrations.js';
 
 // Routes that bypass admin auth / CSRF (login handles its own CSRF).
-const PUBLIC_PATHS = new Set(['/login', '/logout', '/health', '/api/power-automate/inbound']);
+const PUBLIC_PATHS = new Set(['/login', '/logout', '/health']);
 
 export function createApp(ctx) {
   const app = Fastify({
@@ -80,7 +79,6 @@ export function createApp(ctx) {
 
   app.get('/health', async () => ({ status: 'ok' }));
 
-  registerInboundEndpoint(app, ctx);
   registerAuthRoutes(app, ctx);
   registerDraftRoutes(app, ctx);
   registerUserRoutes(app, ctx);

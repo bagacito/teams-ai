@@ -6,7 +6,7 @@ export function createEventRepo(db) {
 
   return {
     // Returns true if this event id was seen for the first time (should process).
-    // Power Automate may retry; event ids dedupe those retries.
+    // External delivery may retry; event ids dedupe those retries.
     firstTimeSeen(eventId, messageId = null) {
       if (!eventId) return true;
       return stmts.insert.run(eventId, messageId).changes > 0;
