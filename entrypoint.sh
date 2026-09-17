@@ -1,8 +1,12 @@
 #!/bin/sh
 # Start as root only to fix ownership of mounted volumes, then drop to the
-# unprivileged `node` user for the actual server process.
-chown -R node:node /app/data 2>/dev/null || true
-# Teams MCP session dir (browser-session credentials) must be writable by the
-# node user; it is mounted from the host and never baked into the image.
-chown -R node:node /app/teams-session 2>/dev/null || true
-exec setpriv --reuid=node --regid=node --init-groups node src/server.js
+# unprivileged app user for the actual server process.
+#
+# IMPORTANT: APP_UID/APP_GID/TEAMS_HOSTNAME must match the machine where the
+# msteams-mcp browser login was performed — the session store is encrypted
+# with a key derived from hostname:username, and the container must present
+# the same identity to decrypt it.
+APP_UID="${APP_UID:-1001}"
+APP_GID="${APP_GID:-1001}"
+chown -R "$APP_UID:$APP_GID" /app/data /app/teams-session 2>/dev/null || true
+exec setpriv --reuid="$APP_UID" --regid="$APP_GID" --init-groups node src/server.js

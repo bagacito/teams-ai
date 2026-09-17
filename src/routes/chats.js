@@ -137,8 +137,56 @@ export function registerChatRoutes(app, ctx) {
         );
         return reply.redirect('/chats');
       }
-      ctx.discoveredChats = res.chats;
-      setFlash(req, `Discovered ${res.chats.length} recent chats.`);
+      // teams_list_chats returns no member list, so 1:1 chats have no
+      // participant names. Best available hint: the last message sender —
+      // if it isn't the account owner, that IS the chat partner.
+      const me = await ctx.teamsProvider.getCurrentUser();
+      const myNames = new Set(
+        me.ok ? [me.user?.displayName, me.user?.email, me.user?.id].filter(Boolean).map(String) : [],
+      );
+      ctx.discoveredChats = res.chats.map((c) => {
+        if (c.participants.length || c.type !== 'oneOnOne') return c;
+        const sender = c.lastMessage?.senderName?.trim();
+        if (sender && !myNames.has(sender)) {
+          return {
+            ...c,
+            participants: [sender],
+            title: c.title && c.title !== '(unnamed)' ? c.title : sender,
+          };
+        }
+        return { ...c, participants: ['(partner — identified after first poll)'] };
+      });
+      // Drop noise: system pseudo-chats (48:*) and chats with no recent
+      // activity and no name — nothing to watch, and unidentifiable.
+      const before = ctx.discoveredChats.length;
+      ctx.discoveredChats = ctx.discoveredChats.filter(
+        (c) => !c.id.startsWith('48:') && (c.lastMessage || (c.title && c.title !== '(unnamed)')),
+      );
+      const hidden = before - ctx.discoveredChats.length;
+      // Deep-resolve remaining unnamed 1:1 chats (you sent the last message):
+      // scan recent thread history for a sender that isn't you. Capped so
+      // Discover stays responsive.
+      const CAP = 8;
+      let resolved = 0;
+      for (const c of ctx.discoveredChats) {
+        if (resolved >= CAP) break;
+        if (c.type !== 'oneOnOne' || c.participants[0] !== '(partner — identified after first poll)') continue;
+        resolved++;
+        const msgs = await ctx.teamsProvider.getMessages(c.id, { limit: 10 }).catch(() => null);
+        if (!msgs?.ok) continue;
+        const other = msgs.messages
+          .map((m) => (m.isFromMe ? '' : m.senderName.trim()))
+          .find((n) => n && !myNames.has(n));
+        if (other) {
+          c.participants = [other];
+          if (c.title === '(unnamed)') c.title = other;
+        }
+      }
+      setFlash(
+        req,
+        `Discovered ${before} recent chats (${hidden} hidden: system chats or no recent activity)` +
+          (resolved ? `; scanned history to name ${resolved} 1:1 chats.` : '.'),
+      );
     } catch (err) {
       setFlash(req, `Discovery failed: ${err.message}`, 'error');
     }

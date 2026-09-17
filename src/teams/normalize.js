@@ -131,7 +131,17 @@ export function normalizeConversation(c) {
   if (!c || typeof c !== 'object') return null;
   const id = String(c.conversationId ?? c.id ?? '').trim();
   if (!id) return null;
-  const last = c.lastMessage && typeof c.lastMessage === 'object' ? c.lastMessage : null;
+  // teams_list_chats carries last-message info as top-level
+  // lastMessageFrom/lastMessagePreview/lastMessageTime fields; other sources
+  // use a nested lastMessage object. Support both shapes.
+  let last = c.lastMessage && typeof c.lastMessage === 'object' ? c.lastMessage : null;
+  if (!last && (c.lastMessageFrom || c.lastMessagePreview || c.lastMessageTime)) {
+    last = {
+      senderName: c.lastMessageFrom || '',
+      preview: c.lastMessagePreview || '',
+      time: c.lastMessageTime || '',
+    };
+  }
   return {
     id,
     title: c.topic || c.displayName || c.title || '(unnamed)',
@@ -141,9 +151,13 @@ export function normalizeConversation(c) {
       : [],
     lastMessage: last
       ? {
-          senderName: last.sender?.displayName || last.senderName || (typeof last.sender === 'string' ? last.sender : '') || '',
+          // teams_list_chats returns lastMessageFrom as a plain display name
+          // string; richer sources use sender.displayName.
+          senderName:
+            last.sender?.displayName || last.senderName || last.lastMessageFrom
+            || (typeof last.sender === 'string' ? last.sender : '') || '',
           content: cleanContent(last.content ?? last.text ?? last.preview ?? ''),
-          timestamp: last.time || last.timestamp || '',
+          timestamp: last.time || last.timestamp || last.lastMessageTime || '',
         }
       : null,
   };

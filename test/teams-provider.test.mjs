@@ -89,6 +89,26 @@ test('normalizeConversation: maps list_chats entries', () => {
   assert.equal(c.lastMessage.content, 'hey');
 });
 
+test('normalizeConversation: maps top-level lastMessage* fields from teams_list_chats', () => {
+  const c = normalizeConversation({
+    conversationId: '19:def@thread.v2',
+    chatType: 'oneOnOne',
+    lastMessageFrom: 'Bob',
+    lastMessagePreview: '<p>quick update</p>',
+    lastMessageTime: '2026-09-17T16:30:00Z',
+  });
+  assert.equal(c.title, '(unnamed)');
+  assert.deepEqual(c.participants, []);
+  assert.equal(c.lastMessage.senderName, 'Bob');
+  assert.equal(c.lastMessage.content, 'quick update');
+  assert.equal(c.lastMessage.timestamp, '2026-09-17T16:30:00Z');
+});
+
+test('normalizeConversation: no last-message fields means lastMessage null', () => {
+  const c = normalizeConversation({ conversationId: '19:xyz@thread.v2', chatType: 'group' });
+  assert.equal(c.lastMessage, null);
+});
+
 // ── Provider error contract (fake-backed) ────────────────────────────────────
 test('fake provider sendMessage contract matches TeamsProvider convention', async () => {
   const { makeCtx } = await import('./helpers.js');

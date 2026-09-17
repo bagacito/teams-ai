@@ -96,7 +96,7 @@ export function createMsTeamsMcpProvider({ logger = { info() {}, warn() {}, erro
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        const parsed = parseCliOutput(stdout);
+        const parsed = unwrapCliOutput(stdout);
         if (parsed) {
           if (parsed.success === false) {
             resolve({
@@ -155,7 +155,10 @@ export function createMsTeamsMcpProvider({ logger = { info() {}, warn() {}, erro
           ? authRequired(res.error)
           : { ok: false, error: res.error, errorType: res.errorType };
       }
-      const p = res.data?.profile ?? {};
+      // teams_get_me returns { success, profile } (profile at top level,
+      // not nested under data).
+      const src = res.data ?? {};
+      const p = src.profile ?? src;
       return {
         ok: true,
         user: {
@@ -239,20 +242,86 @@ export function createMsTeamsMcpProvider({ logger = { info() {}, warn() {}, erro
   };
 }
 
-// Extracts the JSON envelope printed by the CLI (the whole output is one
-// JSON document when --json is used; be defensive anyway).
-function parseCliOutput(stdout) {
+// The CLI prints an MCP envelope like:
+//   { "content": [ { "type": "text", "text": "{\"success\":true,\"data\":{...}}" } ] }
+// (npm may also echo its run banner to stdout before the JSON, so we scan.)
+// Returns the inner tool result object, or null if nothing parseable.
+function unwrapCliOutput(stdout) {
   const text = String(stdout ?? '').trim();
   if (!text) return null;
+  for (const candidate of balancedJsonObjects(text)) {
+    const inner = extractToolResult(candidate);
+    if (inner) return inner;
+  }
+  return null;
+}
+
+// Yield the top-level JSON objects found in `text` (first match wins in
+// practice, but keep all candidates for defensive parsing).
+function balancedJsonObjects(text) {
+  const out = [];
+  const start = text.indexOf('{');
+  if (start === -1) return out;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let objectStart = -1;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') {
+      if (depth === 0) objectStart = i;
+      depth++;
+    } else if (ch === '}') {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && objectStart !== -1) {
+          const slice = text.slice(objectStart, i + 1);
+          try {
+            out.push(JSON.parse(slice));
+          } catch {
+            /* skip malformed object */
+          }
+          objectStart = -1;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// Given a parsed JSON candidate, resolve the inner tool result: unwrap the
+// MCP content[0].text envelope if present, preferring results that declare
+// `success`/`data` (the shape msteams-mcp tools return).
+function extractToolResult(candidate) {
+  if (!candidate || typeof candidate !== 'object') return null;
+  if (candidate.success !== undefined || candidate.data !== undefined) return candidate;
+  const text = candidate?.content?.[0]?.text;
+  if (typeof text === 'string') {
+    const nested = parseCliOutput(text);
+    if (nested && (nested.success !== undefined || nested.data !== undefined)) return nested;
+  }
+  return null;
+}
+
+function parseCliOutput(text) {
+  const str = String(text ?? '').trim();
+  if (!str) return null;
   try {
-    return JSON.parse(text);
+    return JSON.parse(str);
   } catch {
     // Find the last balanced JSON object in the output.
-    const start = text.indexOf('{');
+    const start = str.indexOf('{');
     if (start === -1) return null;
-    for (let end = text.lastIndexOf('}'); end > start; end = text.lastIndexOf('}', end - 1)) {
+    for (let end = str.lastIndexOf('}'); end > start; end = str.lastIndexOf('}', end - 1)) {
       try {
-        return JSON.parse(text.slice(start, end + 1));
+        return JSON.parse(str.slice(start, end + 1));
       } catch {
         /* keep shrinking */
       }

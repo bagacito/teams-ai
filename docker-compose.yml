@@ -1,10 +1,22 @@
 services:
   teams-ai-assistant:
-    build: .
+    build:
+      context: .
+      args:
+        # Container identity MUST match the host machine where the Teams
+        # browser login was done (msteams-mcp encrypts the session with
+        # hostname:username). Set TEAMS_APP_USER/UID/GID/HOSTNAME in .env.
+        APP_USER: ${TEAMS_APP_USER:-vnogueira}
+        APP_UID: ${TEAMS_APP_UID:-1001}
+        APP_GID: ${TEAMS_APP_GID:-1001}
     image: teams-ai-assistant:latest
     container_name: teams-ai-assistant
+    hostname: ${TEAMS_HOSTNAME:-PDM-01642}
     restart: unless-stopped
     env_file: .env
+    environment:
+      APP_UID: ${TEAMS_APP_UID:-1001}
+      APP_GID: ${TEAMS_APP_GID:-1001}
     ports:
       - "3000:3000"   # remove/limit if you proxy via reverse proxy only
     volumes:

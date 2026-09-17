@@ -9,7 +9,9 @@ import { buildStyleSection } from './style.js';
 
 export async function generateDraft({ context }) {
   const messages = buildPromptMessages(context);
-  const raw = await completeChat({ messages, temperature: 0.2 });
+  // Reasoning models may spend hundreds of tokens thinking before writing
+  // the reply — 500 was not enough in practice.
+  const raw = await completeChat({ messages, temperature: 0.2, maxTokens: 1500 });
   return cleanReply(raw);
 }
 

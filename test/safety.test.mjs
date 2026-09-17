@@ -84,26 +84,51 @@ test('AI draft generation never triggers a Teams send', async () => {
   assert.equal(ctx.notifications.length, 1); // but a notification fired
 });
 
-test('generateDraft returns plain text via mocked AI client', async () => {
+test('generateDraft returns plain text via mocked AI endpoint', async () => {
   process.env.PDM_AI_BASE_URL = 'https://mock.local/v1';
   process.env.PDM_AI_API_KEY = 'test-key';
-  const { getAiClient, resetAiClient } = await import('../src/ai/client.js');
-  resetAiClient();
-  const client = getAiClient();
-  client.chat.completions.create = async (params) => {
-    assert.equal(params.temperature, 0.2);
-    assert.match(params.messages[0].content, /Write exactly as the user/);
-    return { choices: [{ message: { content: '```s\non it\n```' } }] };
+  const calls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    calls.push({ url: String(url), body: JSON.parse(opts.body) });
+    return new Response(JSON.stringify({ choices: [{ message: { content: '```s\non it\n```' } }] }), { status: 200 });
   };
-  const reply = await generateDraft({
-    context: {
-      styleExamples: [],
-      recentMessages: [],
-      incomingMessage: { senderName: 'Alice', content: 'Q?' },
-    },
-  });
-  assert.equal(reply, 'on it'); // code fences stripped
-  resetAiClient();
+  try {
+    const reply = await generateDraft({
+      context: {
+        styleExamples: [],
+        recentMessages: [],
+        incomingMessage: { senderName: 'Alice', content: 'Q?' },
+      },
+    });
+    assert.equal(reply, 'on it'); // code fences stripped
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.endsWith('/chat/completions'));
+    assert.equal(calls[0].body.temperature, 0.2);
+    assert.match(calls[0].body.messages[0].content, /Write exactly as the user/);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('completeChat throws on non-2xx and non-JSON bodies', async () => {
+  process.env.PDM_AI_BASE_URL = 'https://mock.local/v1';
+  process.env.PDM_AI_API_KEY = 'test-key';
+  const origFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response('{"error":{"message":"boom"}}', { status: 502 });
+    const client = await import('../src/ai/client.js');
+    await assert.rejects(
+      () => client.completeChat({ messages: [{ role: 'user', content: 'x' }] }),
+      /502/,
+    );
+    // Router quirk: 200 WITHOUT Content-Type — raw body must still be parsed.
+    globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }));
+    const reply = await client.completeChat({ messages: [{ role: 'user', content: 'x' }] });
+    assert.equal(reply, 'ok');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });
 
 test('prompt contains all 8 context layers, history is capped', async () => {

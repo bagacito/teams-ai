@@ -45,7 +45,7 @@ export async function summarizeChat({ chatId, messages, existingSummary, model }
       { role: 'user', content: userContent },
     ],
     temperature: 0.1,
-    maxTokens: 700,
+    maxTokens: 2000,
   });
   logger.info({ chatId }, 'conversation summary updated');
   return summary.trim();
