@@ -128,6 +128,18 @@ test('retry cannot create duplicate sends (sent draft is not re-claimable)', asy
   assert.equal(ctx.repos.draftRepo.get(draft.id).sent_teams_message_id, 'sent-1');
 });
 
+test('AI NO_REPLY decision creates no draft but stores the message', async () => {
+  const ctx = makeCtx();
+  seed(ctx, { aliceAllowed: true });
+  ctx.generate = async () => 'NO_REPLY';
+  const res = await ingest(ctx, { content: 'Deploy finished a few minutes ago.' });
+  assert.equal(res.processed, false);
+  assert.equal(res.reason, 'ai-no-reply');
+  assert.equal(ctx.repos.draftRepo.listByStatus('pending').length, 0);
+  // The message is still stored (history/context for later drafts).
+  assert.ok(ctx.repos.messageRepo.recentForChat(CHAT1, 10).some((m) => m.content === 'Deploy finished a few minutes ago.'));
+});
+
 test('auth-required send failure marks failed with a clear message', async () => {
   const ctx = makeCtx();
   const draft = await createPendingDraft(ctx);

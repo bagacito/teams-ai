@@ -92,8 +92,12 @@ function senderFrom(value, senderObj) {
     email = senderObj.email || senderObj.mail || null;
   }
   if (!id && typeof value === 'string') {
-    // "https://teams.microsoft.com/api/chatsvc/.../contacts/8:orgid:guid" -> "8:orgid:guid"
-    id = value.includes('/') ? value.split('/').pop() : value;
+    id = value;
+  }
+  if (typeof id === 'string') {
+    // "https://teams.cloud.microsoft/api/chatsvc/.../contacts/8:orgid:guid"
+    // -> "8:orgid:guid" (get_thread returns sender.mri as a full URL).
+    id = id.includes('/') ? id.split('/').pop() : id;
   }
   return { id, name, email };
 }

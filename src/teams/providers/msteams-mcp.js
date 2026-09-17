@@ -122,6 +122,21 @@ export function createMsTeamsMcpProvider({ logger = { info() {}, warn() {}, erro
 
   const authRequired = (error) => ({ ok: false, error, errorType: 'AUTH_REQUIRED' });
 
+  // Own MRI (e.g. "8:orgid:<guid>") for isFromMe detection, cached per process.
+  let ownMriCache = null;
+  async function getOwnMri() {
+    if (ownMriCache !== null) return ownMriCache;
+    try {
+      const res = await callCli(TOOL.GET_ME);
+      const src = res.data ?? {};
+      const p = src.profile ?? src;
+      ownMriCache = p.mri || p.id || '';
+    } catch {
+      ownMriCache = '';
+    }
+    return ownMriCache;
+  }
+
   return {
     name: 'msteams-mcp',
 
@@ -201,9 +216,16 @@ export function createMsTeamsMcpProvider({ logger = { info() {}, warn() {}, erro
           ? authRequired(res.error)
           : { ok: false, error: res.error, errorType: res.errorType };
       }
-      const messages = (res.data?.messages ?? [])
+      // The CLI reports isFromMe: false for every message, so detect own
+      // messages here by comparing the sender MRI with the account identity.
+      const ownMri = await getOwnMri();
+      const messages = (res.data?.messages ?? res.messages ?? [])
         .map((m) => normalizeMessage(m, chatId))
-        .filter(Boolean);
+        .filter(Boolean)
+        .map((m) => ({
+          ...m,
+          isFromMe: m.isFromMe === true || (ownMri && m.senderId === ownMri),
+        }));
       return { ok: true, messages };
     },
 

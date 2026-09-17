@@ -61,7 +61,7 @@ test('unapproved user/chat is never fetched and does not generate a draft', asyn
   assert.equal(ctx.notifications.length, 0);
 });
 
-test('message in chat with only unapproved participants is ignored even if scanned', async () => {
+test('message in chat with only unapproved participants goes to AI; NO_REPLY creates no draft', async () => {
   const ctx = makeCtx();
   seed(ctx, { aliceAllowed: true });
   ctx.repos.chatRepo.add(CHAT2, 'Open Chat'); // chat allowed -> scanned
@@ -71,9 +71,10 @@ test('message in chat with only unapproved participants is ignored even if scann
   ctx.teamsProvider.messages = {
     [CHAT2]: [providerMessage({ id: 'm-o1', chatId: CHAT2, senderId: 'bob-id', senderName: 'Bob', content: 'FYI deploy done' })],
   };
+  ctx.generate = async () => 'NO_REPLY';
   const { res } = await pollOnce(ctx);
   assert.equal(res.ok, true);
-  assert.equal(ctx.repos.draftRepo.listByStatus('pending').length, 0); // no-response-signal
+  assert.equal(ctx.repos.draftRepo.listByStatus('pending').length, 0); // AI decided no reply
 });
 
 test('my own message does not generate a draft but is stored (style/history)', async () => {

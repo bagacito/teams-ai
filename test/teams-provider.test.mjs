@@ -54,6 +54,26 @@ test('normalizeMessage: full provider shape', () => {
   assert.equal(m.rawType, 'RichText/Html');
 });
 
+test('normalizeMessage: get_thread shape with sender.mri as full URL', () => {
+  const m = normalizeMessage(
+    {
+      id: '1789673072478',
+      content: 'vou ver isso',
+      contentType: 'text',
+      sender: {
+        mri: 'https://teams.cloud.microsoft/api/chatsvc/emea/v1/users/ME/contacts/8:orgid:36d0e87f',
+        displayName: 'Vítor Nogueira',
+      },
+      timestamp: '2026-09-17T19:30:00Z',
+      isFromMe: false,
+    },
+    '19:chat@unq.gbl.spaces',
+  );
+  assert.equal(m.senderId, '8:orgid:36d0e87f');
+  assert.equal(m.senderName, 'Vítor Nogueira');
+  assert.equal(m.isFromMe, false); // provider layer adds the identity match
+});
+
 test('normalizeMessage: URL-form sender and imdisplayname fallback', () => {
   const m = normalizeMessage(
     {

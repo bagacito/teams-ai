@@ -157,6 +157,14 @@ export function createIngestionPipeline(deps) {
       generate,
     });
 
+    if (draft?.noReply) {
+      log.info(
+        { messageId: record.teamsMessageId, chatId: record.chatId },
+        'no reply needed (AI decision)',
+      );
+      return { processed: false, reason: 'ai-no-reply' };
+    }
+
     if (!draft) {
       log.error({ messageId: record.teamsMessageId }, 'draft generation failed');
       return { processed: false, reason: 'generation-failed' };
@@ -224,6 +232,11 @@ export async function createDraftForMessage({
   if (!reply || !reply.trim()) {
     logger.warn({ messageId: record.teamsMessageId }, 'AI returned empty reply');
     return null;
+  }
+  // The AI may decide the conversation calls for no reply at all.
+  if (/^no[_ ]?reply$/i.test(reply.trim())) {
+    logger.info({ messageId: record.teamsMessageId }, 'AI decided no reply is needed');
+    return { noReply: true };
   }
 
   return draftRepo.create({

@@ -19,9 +19,9 @@ test('shouldDraft: mention => draft', () => {
   assert.equal(r.draft, true);
 });
 
-test('shouldDraft: plain statement without response signal => ignored', () => {
+test('shouldDraft: plain statement without response signal => sent to AI (draft candidate)', () => {
   const r = shouldDraft({ messageType: 'message', content: 'Deploy finished a few minutes ago.' });
-  assert.equal(r.draft, false);
+  assert.equal(r.draft, true);
 });
 
 test('shouldDraft: ok/thanks/greetings => ignored', () => {

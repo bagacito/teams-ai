@@ -1,6 +1,8 @@
 // Decides whether an incoming message warrants a suggested reply.
-// Rule-based for the initial version; kept isolated so it can later be
-// replaced or complemented by AI classification.
+// Only cheap, unambiguous filters live here (own messages, system types,
+// emoji/gif-only, bare acknowledgments). Whether a message deserves a reply
+// is ultimately judged by the AI with the full conversation as context —
+// it can answer NO_REPLY (see prompt.js BEHAVIOR_INSTRUCTIONS).
 
 const IGNORE_PATTERNS = [
   /^\s*ok(a)?y?\s*[.!.]*\s*$/i,
@@ -11,16 +13,6 @@ const IGNORE_PATTERNS = [
   /^\s*(good (morning|afternoon|evening|night))\s*[.!,]*\s*$/i,
   /^\s*by(e|e e)?\s*[.!,]*\s*$/i,
   /^\s*(yes|no|yeah|yep|nope|sure|done|done!|feito)\s*[.!,]*\s*$/i,
-];
-
-const REQUEST_PATTERNS = [
-  /\b(could you|can you|would you|please|por favor|podes?|consegues?|preciso|necessito)\b/i,
-  /\b(what do you think|your opinion|thoughts\??|quanto|when|quando|where|onde|how|como)\b/i,
-];
-
-const QUESTION_PATTERNS = [
-  /\?\s*$/,
-  /\?\s*[^\s?]/, // question mark mid-message (multi-question)
 ];
 
 function isEmojiOnly(text) {
@@ -55,11 +47,7 @@ export function firstIgnoreReason(message) {
   if (isGifOrImageOnly(text)) return 'gif-or-image-only';
   if (IGNORE_PATTERNS.some((p) => p.test(text))) return 'non-response-content';
 
-  const wantsResponse =
-    QUESTION_PATTERNS.some((p) => p.test(text)) ||
-    REQUEST_PATTERNS.some((p) => p.test(text)) ||
-    (message.mentionsMe === true);
-
-  if (!wantsResponse) return 'no-response-signal';
+  // Anything else goes to the AI with full conversation context; the model
+  // decides whether a reply is warranted (NO_REPLY) or drafts one.
   return null;
 }
