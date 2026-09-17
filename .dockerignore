@@ -4,3 +4,4 @@ test
 .git
 .env
 *.log
+!entrypoint.sh

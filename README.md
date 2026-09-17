@@ -177,9 +177,11 @@ docker compose logs -f
 ```
 
 Data (SQLite database) persists in `./data` mounted at `/app/data`. The
-container runs as non-root, exposes port 3000, and has a healthcheck on
-`/health`. No Microsoft credentials live inside the container — only the two
-shared secrets and the PDM.AI key.
+server process runs as the unprivileged `node` user; the container entrypoint
+briefly runs as root only to fix the ownership of the mounted data dir
+(self-healing if the host created `./data` as root). Port 3000 is exposed
+with a healthcheck on `/health`. No Microsoft credentials live inside the
+container — only the two shared secrets and the PDM.AI key.
 
 ## Power Automate inbound flow (Teams → app)
 
@@ -413,4 +415,5 @@ PDM.AI and the outbound flow are fully mocked.
 | Send marked failed with timeout | The flow may still have posted; use Retry only after checking Teams — the shared `requestId` lets an idempotent flow dedupe |
 | No notifications | Verify `NTFY_URL`/`NTFY_TOPIC`, subscribe in the ntfy app, check logs for `notification failed` |
 | `ADMIN_PASSWORD` error at boot | Must be ≥ 16 chars; only read the first time (hashed afterwards) |
+| `unable to open database file` at startup | The mounted `./data` dir is not writable by the container's `node` user (uid 1000). Current images self-heal via the entrypoint; for older builds run `sudo chown -R 1000:1000 data` on the host |
 | Outbound page shows "not configured" | Set both outbound env vars and restart the container |
