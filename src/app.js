@@ -43,7 +43,9 @@ export function createApp(ctx) {
   app.register(session, {
     secret: ctx.sessionSecret,
     cookie: {
-      secure: secureCookies,
+      // Secure flag is decided per request (see onPreHandler below) so the UI
+      // works over plain HTTP on the LAN while staying Secure behind TLS.
+      secure: false,
       httpOnly: true,
       sameSite: 'lax',
       maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
@@ -52,6 +54,14 @@ export function createApp(ctx) {
   });
   app.register(formbody);
   app.register(rateLimit, { global: false });
+
+  app.addHook('preHandler', async (req) => {
+    if (req.session) {
+      // trustProxy is on: req.protocol honors X-Forwarded-Proto from the
+      // reverse proxy, so Secure is set exactly when the browser used HTTPS.
+      req.session.cookie.secure = req.protocol === 'https';
+    }
+  });
 
   const guards = createGuards(ctx);
 
