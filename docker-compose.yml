@@ -1,0 +1,22 @@
+services:
+  teams-ai-assistant:
+    build: .
+    image: teams-ai-assistant:latest
+    container_name: teams-ai-assistant
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"   # remove/limit if you proxy via reverse proxy only
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
