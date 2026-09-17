@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { replyHtml, setFlash } from './guards.js';
 import { esc } from '../views/layout.js';
-import { ensureSubscriptions } from '../teams/subscriptions.js';
 
 const addChatSchema = z.object({
   teams_chat_id: z.string().trim().min(1).max(300),
@@ -10,21 +9,16 @@ const addChatSchema = z.object({
 });
 
 export function registerChatRoutes(app, ctx) {
-  const { chatRepo, subRepo } = ctx.repos;
+  const { chatRepo } = ctx.repos;
 
   app.get('/chats', async (req, reply) => {
     const chats = chatRepo.list();
     const rows = chats
       .map((c) => {
-        const sub = subRepo.getByChatId(c.teams_chat_id);
-        const subInfo = sub
-          ? `<span class="badge ${sub.status === 'active' ? 'sent' : 'rejected'}">${esc(sub.status)}</span> <span class="muted">until ${esc(sub.expires_at)}</span>`
-          : '<span class="muted">no subscription</span>';
         return `<tr>
         <td>${esc(c.display_name || c.teams_chat_id)}<div class="muted">${esc(c.teams_chat_id)}</div></td>
         <td>${esc(short(c.context, 80))}</td>
         <td>${c.enabled ? '<span class="badge sent">enabled</span>' : '<span class="badge rejected">disabled</span>'}</td>
-        <td>${subInfo}</td>
         <td class="row-actions">
           <form method="post" action="/chats/${c.id}/toggle" class="inline">
             <input type="hidden" name="_csrf" value="__CSRF__">
@@ -44,15 +38,15 @@ export function registerChatRoutes(app, ctx) {
     <div class="card">
       <p class="muted">Every message in an enabled chat is eligible — regardless of who writes it.</p>
       <table>
-        <tr><th>Chat</th><th>Context</th><th>Status</th><th>Subscription</th><th></th></tr>
-        ${rows || '<tr><td colspan="5" class="muted">No chats yet.</td></tr>'}
+        <tr><th>Chat</th><th>Context</th><th>Status</th><th></th></tr>
+        ${rows || '<tr><td colspan="4" class="muted">No chats yet.</td></tr>'}
       </table>
     </div>
     <div class="card">
       <h2>Add chat</h2>
       <form method="post" action="/chats">
         <input type="hidden" name="_csrf" value="__CSRF__">
-        <label for="teams_chat_id">Teams chat ID (from Graph, e.g. 19:abc@thread.v2)</label>
+        <label for="teams_chat_id">Teams chat ID (e.g. 19:abc@thread.v2 — from your Power Automate flow)</label>
         <input type="text" id="teams_chat_id" name="teams_chat_id" required>
         <label for="display_name">Friendly name</label>
         <input type="text" id="display_name" name="display_name">
@@ -76,13 +70,7 @@ export function registerChatRoutes(app, ctx) {
     }
     const chat = chatRepo.add(parsed.data.teams_chat_id, parsed.data.display_name, parsed.data.context);
     ctx.logger.info({ chatId: chat.teams_chat_id }, 'allowed chat added');
-    // Try to create a Graph subscription right away.
-    try {
-      await ensureSubscriptions({ chatRepo, subRepo });
-      setFlash(req, 'Chat added. Subscription created if Graph is reachable.');
-    } catch (err) {
-      setFlash(req, 'Chat added, but subscription creation failed. Check /subscriptions.', 'error');
-    }
+    setFlash(req, 'Chat added. Make sure your Power Automate flow covers this chat.');
     return reply.redirect('/chats');
   });
 

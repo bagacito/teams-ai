@@ -6,6 +6,8 @@ import { summaryTriggerCount } from '../context/summaries.js';
 // Settings stored in the DB (override env defaults where present).
 
 const SETTING_KEYS = [
+  ['my_user_id', 'My Teams user ID or email (to recognize my own messages)', 'text'],
+  ['my_email', 'My email (alternative identifier for own messages)', 'text'],
   ['global_context', 'Global context about you (used in every draft)', 'textarea'],
   ['recent_message_count', 'Recent messages included as context', 'number'],
   ['draft_expiry_hours', 'Hours before pending drafts expire', 'number'],

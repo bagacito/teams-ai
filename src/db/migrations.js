@@ -99,6 +99,17 @@ const migrations = [
       `);
     },
   },
+  {
+    version: 2,
+    up: (db) => {
+      // Power Automate bridge: outbound tracing + reply threading + message id on events.
+      db.exec(`ALTER TABLE drafts ADD COLUMN outbound_request_id TEXT`);
+      db.exec(`ALTER TABLE drafts ADD COLUMN sent_teams_message_id TEXT`);
+      db.exec(`ALTER TABLE messages ADD COLUMN reply_to TEXT`);
+      db.exec(`ALTER TABLE processed_events ADD COLUMN message_id TEXT`);
+      db.exec(`DROP TABLE IF EXISTS subscriptions`); // Graph subscriptions removed (Power Automate bridge)
+    },
+  },
 ];
 
 export function runMigrations(db) {

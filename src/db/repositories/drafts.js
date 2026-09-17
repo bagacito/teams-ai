@@ -19,7 +19,9 @@ export function createDraftRepo(db) {
         approved_at = COALESCE(@approved_at, approved_at),
         sent_at = COALESCE(@sent_at, sent_at),
         error = @error,
-        edited_reply = COALESCE(@edited_reply, edited_reply)
+        edited_reply = COALESCE(@edited_reply, edited_reply),
+        outbound_request_id = COALESCE(@outbound_request_id, outbound_request_id),
+        sent_teams_message_id = COALESCE(@teams_message_id, sent_teams_message_id)
       WHERE id = @id AND status IN (SELECT value FROM json_each(@expected))
     `),
     setEdited: db.prepare(
@@ -42,6 +44,8 @@ export function createDraftRepo(db) {
       sent_at: toFields.sentAt ?? null,
       error: toFields.error ?? null,
       edited_reply: toFields.editedReply ?? null,
+      outbound_request_id: toFields.outboundRequestId ?? null,
+      teams_message_id: toFields.teamsMessageId ?? null,
     });
     return info.changes > 0;
   }
@@ -78,11 +82,14 @@ export function createDraftRepo(db) {
     },
     // claim for sending (pending|edited|failed -> sending). Idempotent guard
     // against double-send; only explicit approval/retry actions reach here.
-    claimForSending(id) {
-      return transition(id, [...ACTIVE_STATUSES, 'failed'], { status: 'sending' });
+    claimForSending(id, requestId = null) {
+      return transition(id, [...ACTIVE_STATUSES, 'failed'], {
+        status: 'sending',
+        outboundRequestId: requestId,
+      });
     },
-    markSent(id, sentAt = new Date().toISOString()) {
-      return transition(id, ['sending'], { status: 'sent', sentAt });
+    markSent(id, { sentAt = new Date().toISOString(), teamsMessageId = null } = {}) {
+      return transition(id, ['sending'], { status: 'sent', sentAt, teamsMessageId });
     },
     markFailed(id, error) {
       return transition(id, ['sending'], { status: 'failed', error: String(error).slice(0, 500) });

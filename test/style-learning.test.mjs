@@ -1,12 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sendApprovedDraft } from '../src/routes/drafts.js';
-import { makeCtx, graphMessage, notification, seed, CHAT1, ME } from './helpers.js';
+import { makeCtx, ingest, seed, CHAT1 } from './helpers.js';
 
 async function createPendingDraft(ctx) {
   seed(ctx, { aliceAllowed: true });
-  ctx.graphMessage = graphMessage({ content: 'Can you review my PR?' });
-  const res = await ctx.pipeline.processNotification(notification());
+  const res = await ingest(ctx);
   return ctx.repos.draftRepo.get(res.draftId);
 }
 
@@ -45,16 +44,13 @@ test('rejected draft never becomes a style example', async () => {
   const draft = await createPendingDraft(ctx);
   ctx.repos.draftRepo.reject(draft.id);
   assert.equal(ctx.repos.styleRepo.count(), 0);
-  // Even if later approved (it cannot be), nothing was recorded already.
   assert.equal(ctx.repos.styleRepo.list().some((e) => e.message === draft.generated_reply), false);
 });
 
 test('failed send does not create style example', async () => {
   const ctx = makeCtx();
   const draft = await createPendingDraft(ctx);
-  ctx.sendTeamsMessage = async () => {
-    throw new Error('boom');
-  };
+  ctx.outboundShouldFail = true;
   await sendApprovedDraft(ctx, draft, { edited: false });
   assert.equal(ctx.repos.styleRepo.count(), 0);
 });
@@ -69,13 +65,14 @@ test('style repo dedupes identical messages', async () => {
 test('my own sent messages become teams style candidates (substantive only)', async () => {
   const ctx = makeCtx();
   seed(ctx, { aliceAllowed: true });
-  ctx.graphMessage = graphMessage({ senderId: ME, senderName: 'Me', content: 'Sure, I will check the deployment logs and report back in ten minutes.' });
-  await ctx.pipeline.processNotification(notification());
+  await ingest(ctx, {
+    senderId: 'me-user-id', senderEmail: 'me@company.com',
+    messageText: 'Sure, I will check the deployment logs and report back in ten minutes.',
+  });
   const examples = ctx.repos.styleRepo.list();
   assert.equal(examples.length, 1);
   assert.equal(examples[0].source, 'teams');
   // short/emoji junk is not captured
-  ctx.graphMessage = graphMessage({ senderId: ME, content: 'ok!' });
-  await ctx.pipeline.processNotification(notification({ messageId: 'msg-2', eventId: 'evt-2' }));
+  await ingest(ctx, { eventId: 'evt-2', messageId: 'msg-2', messageText: 'ok!' });
   assert.equal(ctx.repos.styleRepo.count(), 1);
 });

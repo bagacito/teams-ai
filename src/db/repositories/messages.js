@@ -1,8 +1,8 @@
 export function createMessageRepo(db) {
   const stmts = {
     insert: db.prepare(`
-      INSERT INTO messages (teams_message_id, chat_id, sender_id, sender_name, content, message_type, is_me)
-      VALUES (@teams_message_id, @chat_id, @sender_id, @sender_name, @content, @message_type, @is_me)
+      INSERT INTO messages (teams_message_id, chat_id, sender_id, sender_name, content, message_type, reply_to, is_me)
+      VALUES (@teams_message_id, @chat_id, @sender_id, @sender_name, @content, @message_type, @reply_to, @is_me)
     `),
     recent: db.prepare(`
       SELECT * FROM messages WHERE chat_id = ?
@@ -24,6 +24,7 @@ export function createMessageRepo(db) {
           sender_name: message.senderName ?? '',
           content: message.content ?? '',
           message_type: message.messageType ?? 'message',
+          reply_to: message.replyTo ?? null,
           is_me: message.isMe ? 1 : 0,
         });
         return stmts.getById.get(message.teamsMessageId);

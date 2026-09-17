@@ -3,9 +3,9 @@ import { BEHAVIOR_INSTRUCTIONS, STYLE_INSTRUCTIONS } from './prompt.js';
 import { buildStyleSection } from './style.js';
 
 // Draft generation. This module produces reply text only.
-// It MUST NOT import anything from src/teams/send.js — the only code path
-// that sends Teams messages is the approval flow (routes/drafts.js).
-// See tests/test-safety-boundary.mjs for enforcement.
+// It MUST NOT import anything from src/integrations/power-automate/outbound.js
+// — the only code path that sends Teams messages is the approval flow
+// (routes/drafts.js). See test/safety.test.mjs for enforcement.
 
 export async function generateDraft({ context }) {
   const messages = buildPromptMessages(context);

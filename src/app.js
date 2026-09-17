@@ -12,11 +12,11 @@ import { registerUserRoutes } from './routes/users.js';
 import { registerChatRoutes } from './routes/chats.js';
 import { registerStyleRoutes } from './routes/style.js';
 import { registerSettingsRoutes } from './routes/settings.js';
-import { registerSubscriptionRoutes } from './routes/subscriptions.js';
-import { registerWebhookRoutes } from './routes/webhook.js';
+import { registerInboundEndpoint } from './integrations/power-automate/inbound.js';
+import { registerIntegrationsRoutes } from './routes/integrations.js';
 
 // Routes that bypass admin auth / CSRF (login handles its own CSRF).
-const PUBLIC_PATHS = new Set(['/login', '/logout', '/webhook', '/health']);
+const PUBLIC_PATHS = new Set(['/login', '/logout', '/health', '/api/power-automate/inbound']);
 
 export function createApp(ctx) {
   const app = Fastify({
@@ -70,14 +70,14 @@ export function createApp(ctx) {
 
   app.get('/health', async () => ({ status: 'ok' }));
 
-  registerWebhookRoutes(app, ctx);
+  registerInboundEndpoint(app, ctx);
   registerAuthRoutes(app, ctx);
   registerDraftRoutes(app, ctx);
   registerUserRoutes(app, ctx);
   registerChatRoutes(app, ctx);
   registerStyleRoutes(app, ctx);
   registerSettingsRoutes(app, ctx);
-  registerSubscriptionRoutes(app, ctx);
+  registerIntegrationsRoutes(app, ctx);
 
   app.setErrorHandler((err, req, reply) => {
     if (err.statusCode && err.statusCode < 500) {

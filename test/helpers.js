@@ -6,17 +6,18 @@ import { createMessageRepo } from '../src/db/repositories/messages.js';
 import { createDraftRepo } from '../src/db/repositories/drafts.js';
 import { createStyleRepo } from '../src/db/repositories/style.js';
 import { createSummaryRepo } from '../src/db/repositories/summaries.js';
-import { createSubscriptionRepo } from '../src/db/repositories/subscriptions.js';
 import { createEventRepo } from '../src/db/repositories/events.js';
 import { createSettingsRepo } from '../src/db/repositories/settings.js';
 import { createAdminAuthRepo } from '../src/db/repositories/admin-auth.js';
-import { createIngestionPipeline } from '../src/teams/webhook.js';
+import { createIngestionPipeline } from '../src/pipeline/ingest.js';
+import { createApp } from '../src/app.js';
 
 export const ME = 'me-user-id';
+export const ME_EMAIL = 'me@company.com';
 export const ALICE = 'alice-user-id';
-export const BOB = 'bob-user-id';
 export const CHAT1 = 'chat-1-id';
 export const CHAT2 = 'chat-2-id';
+export const SECRET = 'test-inbound-secret';
 
 export function makeCtx() {
   const db = new Database(':memory:');
@@ -30,7 +31,6 @@ export function makeCtx() {
     draftRepo: createDraftRepo(db),
     styleRepo: createStyleRepo(db),
     summaryRepo: createSummaryRepo(db),
-    subRepo: createSubscriptionRepo(db),
     eventRepo: createEventRepo(db),
     settingsRepo: createSettingsRepo(db),
     adminAuthRepo: createAdminAuthRepo(db),
@@ -40,19 +40,25 @@ export function makeCtx() {
     db,
     repos,
     myUserId: ME,
+    myEmail: ME_EMAIL,
+    inboundSecret: SECRET,
+    sessionSecret: 'test-session-secret-at-least-32-chars-long!!',
     logger: {
       child: () => ctx.logger,
       info() {}, warn() {}, error() {}, debug() {},
     },
-    sendCalls: [],
+    outboundCalls: [],
     notifications: [],
     generated: 0,
   };
 
-  // Mock Teams send: records calls, never touches the network.
-  ctx.sendTeamsMessage = async (chatId, text) => {
-    ctx.sendCalls.push({ chatId, text });
-    return { id: `sent-${ctx.sendCalls.length}` };
+  // Mock outbound Power Automate sender: records calls, never touches network.
+  ctx.sendOutbound = async ({ draftId, chatId, replyToMessageId, messageText, dryRun }) => {
+    ctx.outboundCalls.push({ draftId, chatId, replyToMessageId, messageText, dryRun });
+    if (ctx.outboundShouldFail) {
+      return { ok: false, httpStatus: ctx.outboundFailStatus ?? 500, teamsMessageId: null, error: ctx.outboundFailError ?? 'flow failed', requestId: 'req-x' };
+    }
+    return { ok: true, httpStatus: 200, teamsMessageId: `sent-${ctx.outboundCalls.length}`, error: null, requestId: `req-${ctx.outboundCalls.length}` };
   };
 
   // Mock notifier.
@@ -82,35 +88,48 @@ export function makeCtx() {
     settingsRepo: repos.settingsRepo,
     notifier: ctx.notifier,
     myUserId: ME,
+    myEmail: ME_EMAIL,
     generate: ctx.generate,
-    fetchMessage: async (chatId, messageId) => ctx.graphMessages?.[messageId] ?? ctx.graphMessage,
-    fetchChat: async () => ({ topic: 'Project Alpha' }),
   });
 
   return ctx;
 }
 
-// Standard Graph-shaped message for fetchMessage mock.
-export function graphMessage({ senderId = ALICE, senderName = 'Alice', content = 'hello', mentions = [], messageType = 'message' } = {}) {
+// Standard Power Automate inbound payload.
+export function inboundPayload(overrides = {}) {
   return {
-    id: 'graph-msg-id',
-    messageType,
-    from: { user: { id: senderId, displayName: senderName } },
-    body: { content, contentType: 'text' },
-    mentions,
+    eventId: overrides.eventId ?? 'evt-1',
+    messageId: overrides.messageId ?? 'msg-1',
+    chatId: overrides.chatId ?? CHAT1,
+    chatName: overrides.chatName ?? 'Project Alpha',
+    senderId: overrides.senderId ?? ALICE,
+    senderName: overrides.senderName ?? 'Alice',
+    senderEmail: overrides.senderEmail ?? 'alice@company.com',
+    messageText: overrides.messageText ?? 'Can you review my PR?',
+    messageType: overrides.messageType ?? 'message',
+    timestamp: overrides.timestamp ?? '2026-09-17T15:00:00Z',
+    replyToMessageId: overrides.replyToMessageId ?? null,
+    mentionedMe: overrides.mentionedMe ?? false,
   };
 }
 
-export function notification({ eventId = 'evt-1', chatId = CHAT1, messageId = 'msg-1', changeType = 'created' } = {}) {
-  return {
-    id: eventId,
-    changeType,
-    resource: `chats('${chatId}')/messages('${messageId}')`,
-    resourceData: { id: `${chatId};;${messageId}` },
-  };
+// Run a payload through the pipeline directly (non-HTTP path).
+export async function ingest(ctx, overrides = {}) {
+  const { recordFromPayload } = await import('../src/pipeline/ingest.js');
+  const payload = inboundPayload(overrides);
+  const record = recordFromPayload(payload, { myUserId: ME, myEmail: ME_EMAIL });
+  return ctx.pipeline.processMessage(record, { eventId: payload.eventId });
 }
 
 export function seed(ctx, { aliceAllowed = true, chatAllowed = false } = {}) {
   if (aliceAllowed) ctx.repos.userRepo.add(ALICE, 'Alice');
   if (chatAllowed) ctx.repos.chatRepo.add(CHAT2, 'Group Chat');
+}
+
+// Full HTTP app for endpoint tests.
+export async function makeHttpApp() {
+  const ctx = makeCtx();
+  const app = createApp(ctx);
+  await app.ready();
+  return { ctx, app };
 }

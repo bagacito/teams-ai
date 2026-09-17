@@ -15,7 +15,7 @@ const NAV = [
   ['/chats', 'Chats'],
   ['/style', 'Style'],
   ['/settings', 'Settings'],
-  ['/subscriptions', 'Subscriptions'],
+  ['/integrations', 'Integrations'],
 ];
 
 export function layout({ title, active, csrf, flash, body }) {
