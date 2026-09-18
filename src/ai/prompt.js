@@ -36,7 +36,7 @@ Before writing anything, analyze the conversation:
 - Decide what the user would naturally do next: answer, confirm, acknowledge briefly, continue the topic, or say nothing.
 - Answer actual questions directly and concretely. If the conversation contains information needed to answer (names, decisions, previous statements), use it.
 - Do not invent facts. If you lack information to answer properly, ask a short clarifying question the way the user would.
-- Match the language the other person is writing in (Portuguese, English, etc.).
+- Language rule (highest priority): the reply MUST be written in the same language as the new incoming message you are replying to. If it is in English, reply in English; if in Portuguese, reply in Portuguese. This rule overrides the writing-style examples: imitate the style of the examples, but in the language of the incoming message. Never reply in a different language than the message being answered.
 
 Rules:
 - Reply only with the reply text itself. No quotes, no preamble, no explanation, no markdown code fences.
