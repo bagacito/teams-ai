@@ -3,6 +3,7 @@ import { isMessageAllowed } from '../policy/allowlist.js';
 import { shouldDraft } from '../policy/should-draft.js';
 import { generateDraft } from '../ai/draft.js';
 import { getRecentMessages, getChatContext } from '../context/chat-context.js';
+import { createDraftDebouncer } from '../context/debounce.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Draft ingestion pipeline.
@@ -48,7 +49,10 @@ export function createIngestionPipeline(deps) {
     myUserId = null,
     myEmail = null,
     generate = generateDraft,
+    debounceMs = Math.max(0, Number(process.env.DRAFT_DEBOUNCE_SECONDS ?? 90) * 1000),
   } = deps;
+
+  const log = logger.child({ component: 'pipeline' });
 
   const policy = {
     isUserAllowed: (id) => {
@@ -65,6 +69,74 @@ export function createIngestionPipeline(deps) {
     getUser: (id) => userRepo.getByEntraId(id),
     getChat: (id) => chatRepo.getByChatId(id),
   };
+
+  // Shared tail of draft creation: generate + notify. Returns the draft row
+  // (or { noReply: true } / null). Never sends anything to Teams.
+  async function draftAndNotify(record) {
+    const chatRow = policy.getChat(record.chatId);
+    const draft = await createDraftForMessage({
+      record,
+      chatName: chatRow?.display_name || record.chatName || record.chatId,
+      chatRow,
+      settingsRepo,
+      summaryRepo,
+      styleRepo,
+      draftRepo,
+      messageRepo,
+      generate,
+    });
+
+    if (draft?.noReply) {
+      log.info(
+        { messageId: record.teamsMessageId, chatId: record.chatId },
+        'no reply needed (AI decision)',
+      );
+      return { noReply: true };
+    }
+    if (!draft) {
+      log.error({ messageId: record.teamsMessageId }, 'draft generation failed');
+      return null;
+    }
+
+    log.info(
+      { messageId: record.teamsMessageId, chatId: record.chatId, draftId: draft.id, sender: record.senderName },
+      'draft generated',
+    );
+
+    // Notify — STOP THERE. Nothing is sent to Teams.
+    if (notifier) {
+      try {
+        await notifier.notifyNewDraft(draft, { chatName: chatRow?.display_name || record.chatName });
+        log.info({ draftId: draft.id }, 'notification sent');
+      } catch (err) {
+        log.warn({ err: err.message }, 'notification failed (draft still pending)');
+      }
+    }
+    return { draft };
+  }
+
+  // Debounced mode (delayMs > 0): response-worthy messages do not draft
+  // immediately. One flush per chat after a quiet period; the flush builds
+  // context from the DB, so messages that arrived in the meantime are covered.
+  // Exactly one open (pending/edited/sending) draft per chat: a pending draft
+  // that no longer covers the newest messages is superseded and regenerated;
+  // an edited draft means the user is already handling it — no new draft.
+  const debouncer =
+    debounceMs > 0
+      ? createDraftDebouncer({
+          delayMs: debounceMs,
+          log,
+          flush: async (chatId, record) => {
+            // Re-check at flush time: if the user approved/edited/sent a draft
+            // in the meantime, they are handling the conversation — do not
+            // generate a second response for the same messages.
+            const active = draftRepo.findActiveForChat(chatId);
+            if (active && active.status !== 'pending') return;
+            if (active) draftRepo.supersede(active.id);
+            await draftAndNotify(record);
+          },
+        })
+      : null;
 
   // Processes one normalized provider record. Returns { processed, reason, draftId }.
   // retry=true (poller re-processing after a failure) allows regenerating a
@@ -143,52 +215,24 @@ export function createIngestionPipeline(deps) {
       return { processed: false, reason: decision.reason };
     }
 
-    // Build context and generate the draft.
-    const chatRow = policy.getChat(record.chatId);
-    const draft = await createDraftForMessage({
-      record,
-      chatName: chatRow?.display_name || record.chatName || record.chatId,
-      chatRow,
-      settingsRepo,
-      summaryRepo,
-      styleRepo,
-      draftRepo,
-      messageRepo,
-      generate,
-    });
-
-    if (draft?.noReply) {
-      log.info(
-        { messageId: record.teamsMessageId, chatId: record.chatId },
-        'no reply needed (AI decision)',
-      );
-      return { processed: false, reason: 'ai-no-reply' };
-    }
-
-    if (!draft) {
-      log.error({ messageId: record.teamsMessageId }, 'draft generation failed');
-      return { processed: false, reason: 'generation-failed' };
-    }
-
-    log.info(
-      { messageId: record.teamsMessageId, chatId: record.chatId, draftId: draft.id, sender: record.senderName },
-      'draft generated',
-    );
-
-    // Notify — STOP THERE. Nothing is sent to Teams.
-    if (notifier) {
-      try {
-        await notifier.notifyNewDraft(draft, { chatName: chatRow?.display_name || record.chatName });
-        log.info({ draftId: draft.id }, 'notification sent');
-      } catch (err) {
-        log.warn({ err: err.message }, 'notification failed (draft still pending)');
+    // Build context and generate the draft — either immediately (debounce
+    // disabled) or once the chat goes quiet (see debouncer above).
+    if (debouncer) {
+      const active = draftRepo.findActiveForChat(record.chatId);
+      if (active && active.status !== 'pending') {
+        return { processed: false, reason: 'active-draft-exists' };
       }
+      debouncer.schedule(record.chatId, record);
+      return { processed: false, reason: 'draft-scheduled' };
     }
 
-    return { processed: true, draftId: draft.id };
+    const result = await draftAndNotify(record);
+    if (result?.noReply) return { processed: false, reason: 'ai-no-reply' };
+    if (!result) return { processed: false, reason: 'generation-failed' };
+    return { processed: true, draftId: result.draft.id };
   }
 
-  return { processMessage };
+  return { processMessage, debouncer };
 }
 
 // ── Draft creation with context ──────────────────────────────────────────────
@@ -250,7 +294,7 @@ export async function createDraftForMessage({
 }
 
 // Only substantive own messages become style candidates.
-function isUsableStyleCandidate(content) {
+export function isUsableStyleCandidate(content) {
   const text = String(content || '').trim();
   if (text.length < 15 || text.length > 2000) return false;
   if (/^<gif|^<image/i.test(text)) return false;

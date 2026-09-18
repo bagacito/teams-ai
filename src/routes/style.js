@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { replyHtml, setFlash } from './guards.js';
 import { esc } from '../views/layout.js';
+import { syncStyleFromChats } from '../context/style-sync.js';
 
 const addExampleSchema = z.object({
   message: z.string().trim().min(1).max(2000),
@@ -41,6 +42,13 @@ export function registerStyleRoutes(app, ctx) {
     <h1>Writing style examples</h1>
     <div class="card">
       <p class="muted">These are few-shot examples of messages you actually wrote. AI-generated text only becomes an example after you approve or edit it. Rejected drafts are never used.</p>
+      <div class="actions">
+        <form method="post" action="/style/sync" class="inline">
+          <input type="hidden" name="_csrf" value="__CSRF__">
+          <button class="btn primary" type="submit">Sync style from Teams</button>
+        </form>
+        <span class="muted">Pulls your recent sent messages from every enabled chat and adds new ones as style examples.</span>
+      </div>
       <table>
         <tr><th>Example</th><th>Status</th><th></th></tr>
         ${rows || '<tr><td colspan="3" class="muted">No examples yet — send some messages or approve drafts.</td></tr>'}
@@ -67,6 +75,29 @@ export function registerStyleRoutes(app, ctx) {
     const added = styleRepo.add(parsed.data.message, 'manual');
     if (!added) setFlash(req, 'Identical example already exists.', 'error');
     else setFlash(req, 'Style example added.');
+    return reply.redirect('/style');
+  });
+
+  app.post('/style/sync', async (req, reply) => {
+    try {
+      const res = await syncStyleFromChats(ctx, { limit: 200 });
+      if (res.chatsTotal === 0) {
+        setFlash(req, 'No enabled chats to sync from. Add chats first.', 'error');
+      } else if (res.authRequired) {
+        setFlash(req, 'Teams not authenticated — run the msteams-mcp login command (see README).', 'error');
+      } else {
+        const parts = [
+          `Scanned ${res.chatsFetched}/${res.chatsTotal} chats.`,
+          `Found ${res.candidates} of your messages.`,
+          res.added ? `Added ${res.added} new style examples.` : 'No new examples (all already known).',
+          res.chatsFailed ? `${res.chatsFailed} chats failed to fetch.` : '',
+        ];
+        setFlash(req, parts.filter(Boolean).join(' '), 'ok');
+        ctx.logger.info({ added: res.added, chats: res.chatsFetched }, 'style sync completed');
+      }
+    } catch (err) {
+      setFlash(req, `Style sync failed: ${err.message}`, 'error');
+    }
     return reply.redirect('/style');
   });
 

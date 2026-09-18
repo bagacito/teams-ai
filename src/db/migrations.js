@@ -128,6 +128,44 @@ const migrations = [
       db.exec(`ALTER TABLE drafts DROP COLUMN outbound_request_id`);
     },
   },
+  {
+    version: 4,
+    up: (db) => {
+      // Draft debounce: allow the 'superseded' status (a pending draft replaced
+      // by a newer draft that covers messages that arrived after it). SQLite
+      // cannot alter a CHECK constraint, so the table is rebuilt.
+      db.exec(`
+        CREATE TABLE drafts_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_id TEXT NOT NULL,
+          source_message_id TEXT NOT NULL,
+          sender_id TEXT NOT NULL DEFAULT '',
+          sender_name TEXT NOT NULL DEFAULT '',
+          original_message TEXT NOT NULL DEFAULT '',
+          generated_reply TEXT NOT NULL DEFAULT '',
+          edited_reply TEXT,
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK (status IN ('pending','approved','edited','rejected','sending','sent','failed','expired','superseded')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          approved_at TEXT,
+          sent_at TEXT,
+          error TEXT,
+          sent_teams_message_id TEXT
+        );
+        INSERT INTO drafts_new (id, chat_id, source_message_id, sender_id, sender_name,
+          original_message, generated_reply, edited_reply, status, created_at,
+          approved_at, sent_at, error, sent_teams_message_id)
+        SELECT id, chat_id, source_message_id, sender_id, sender_name,
+          original_message, generated_reply, edited_reply, status, created_at,
+          approved_at, sent_at, error, sent_teams_message_id
+        FROM drafts;
+        DROP TABLE drafts;
+        ALTER TABLE drafts_new RENAME TO drafts;
+        CREATE INDEX IF NOT EXISTS idx_drafts_status ON drafts(status);
+        CREATE INDEX IF NOT EXISTS idx_drafts_source ON drafts(source_message_id);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db) {

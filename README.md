@@ -136,6 +136,11 @@ Poll behaviour:
 - skips chats whose last message matches the stored cursor;
 - sorts new messages oldest→newest, deduplicates by Teams message ID;
 - your own messages are stored (for history/style) but never drafted;
+- **message batching**: after a response-worthy message, drafting waits
+  `DRAFT_DEBOUNCE_SECONDS` (default 90) of quiet in that chat, so messages
+  split across several sends produce ONE draft covering all of them. If a
+  pending draft is overtaken by newer messages it is superseded and
+  regenerated; a draft you edited is never replaced;
 - one chat failing does not stop the others; repeated provider failures back
   off exponentially (up to 10 minutes).
 
@@ -146,7 +151,10 @@ an active poll) are skipped.
 
 - **Chats** (`/chats` → **Discover Teams chats**): lists recent Teams
   conversations with title, ID, participants and last activity. Click
-  **Add to approved chats** — no more copying opaque chat IDs.
+  **Add to approved chats** — no more copying opaque chat IDs. Each chat row
+  has an **Edit** action to set its friendly name and **custom context**
+  (project facts, decisions, roles, tone rules) injected into every draft for
+  that chat — the main lever for making answers less shallow.
 - **Users** (`/users`): senders actually seen in stored messages appear under
   **Known senders**; click **Allow** to add them.
 
@@ -158,7 +166,8 @@ the chat means any participant can trigger drafting).
 
 1. Wait for a poll cycle (or **Integrations → Poll now**).
 2. An eligible message (question/request/mention) produces a **pending draft**
-   and an ntfy notification.
+   and an ntfy notification — after the debounce quiet period, and only one
+   draft per batch of split messages (see poll behaviour above).
 3. In **Drafts**, choose **Approve & Send**, **Edit** (edited text is sent
    instead and learned as a better style example), or **Reject**.
 4. The send goes through `TeamsProvider.sendMessage()` — exactly once, with an
@@ -169,6 +178,15 @@ The **Integrations** page shows provider status (Connected / Login required /
 Error / Disconnected), last successful poll, chats scanned, messages
 discovered, pending drafts, and **Poll now / Pause / Resume** controls. It
 never displays tokens or session content.
+
+### Writing style
+
+Style examples live in `/style`: messages you actually wrote (auto-captured
+from your own sent messages, plus approved/edited drafts, plus manual
+entries). The **Sync style from Teams** button bulk-imports your recent sent
+messages from every enabled chat — useful for bootstrapping after the first
+login. Examples are deduplicated; disable or delete any that don't represent
+how you write.
 
 ## Configuration reference
 
@@ -188,6 +206,7 @@ never displays tokens or session content.
 | `MSTEAMS_MCP_TIMEOUT_MS` | no | Per CLI call timeout (default 90000). |
 | `NTFY_URL` / `NTFY_TOPIC` / `NTFY_TOKEN` / `NTFY_DETAIL_MODE` | no | ntfy notifications (`minimal` hides contents). |
 | `RECENT_MESSAGE_COUNT` / `SUMMARY_TRIGGER_MESSAGE_COUNT` / `DRAFT_EXPIRY_HOURS` | no | Context sizing / summary trigger / draft TTL. |
+| `DRAFT_DEBOUNCE_SECONDS` | no | Quiet period before drafting per chat (default 90). Batches messages split across several sends into one draft; `0` drafts immediately. |
 | `DATA_DIR` | no | SQLite location (default `./data`). |
 | `LOG_LEVEL` | no | pino level. |
 

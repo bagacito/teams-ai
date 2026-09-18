@@ -8,6 +8,11 @@ const addChatSchema = z.object({
   context: z.string().max(5000).default(''),
 });
 
+const editChatSchema = z.object({
+  display_name: z.string().trim().max(200).default(''),
+  context: z.string().max(5000).default(''),
+});
+
 export function registerChatRoutes(app, ctx) {
   const { chatRepo } = ctx.repos;
   // In-memory result of the last discovery (never persisted).
@@ -57,6 +62,7 @@ export function registerChatRoutes(app, ctx) {
         <td>${esc(short(c.context, 80))}</td>
         <td>${c.enabled ? '<span class="badge sent">enabled</span>' : '<span class="badge rejected">disabled</span>'}</td>
         <td class="row-actions">
+          <a class="btn small" href="/chats/${c.id}/edit">Edit</a>
           <form method="post" action="/chats/${c.id}/toggle" class="inline">
             <input type="hidden" name="_csrf" value="__CSRF__">
             <button class="btn small" type="submit">${c.enabled ? 'Disable' : 'Enable'}</button>
@@ -205,6 +211,51 @@ export function registerChatRoutes(app, ctx) {
       ctx.logger.info({ chatId: id }, 'allowed chat added (discovery)');
     }
     setFlash(req, 'Chat added to approved chats.');
+    return reply.redirect('/chats');
+  });
+
+  // Per-chat context editing: name + custom instructions injected into every
+  // draft for this chat. This is the main lever for making answers less
+  // shallow — put project facts, decisions, and tone rules here.
+  app.get('/chats/:id/edit', async (req, reply) => {
+    const chat = chatRepo.get(Number(req.params.id));
+    if (!chat) {
+      setFlash(req, 'Chat not found.', 'error');
+      return reply.redirect('/chats');
+    }
+    const body = `
+    <h1>Edit chat</h1>
+    <div class="card">
+      <p class="muted">${esc(chat.teams_chat_id)}</p>
+      <form method="post" action="/chats/${chat.id}/edit">
+        <input type="hidden" name="_csrf" value="__CSRF__">
+        <label for="display_name">Friendly name</label>
+        <input type="text" id="display_name" name="display_name" value="${esc(chat.display_name)}">
+        <label for="context">Custom context for this chat (extra instructions for the AI)</label>
+        <textarea id="context" name="context" rows="8" placeholder="e.g. Project Alpha discussions. Budget owner: Alice. Current milestone: v2 launch Oct 10. I am the tech lead; answer authoritatively about scope.">${esc(chat.context)}</textarea>
+        <div class="actions">
+          <button class="btn primary" type="submit">Save</button>
+          <a class="btn" href="/chats">Cancel</a>
+        </div>
+      </form>
+    </div>`;
+    return replyHtml(req, reply, { title: 'Edit chat', active: '/chats', body: injectCsrf(body, req) });
+  });
+
+  app.post('/chats/:id/edit', async (req, reply) => {
+    const chat = chatRepo.get(Number(req.params.id));
+    if (!chat) {
+      setFlash(req, 'Chat not found.', 'error');
+      return reply.redirect('/chats');
+    }
+    const parsed = editChatSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      setFlash(req, `Invalid input: ${parsed.error.issues[0]?.message}`, 'error');
+      return reply.redirect(`/chats/${chat.id}/edit`);
+    }
+    chatRepo.update(chat.id, parsed.data);
+    ctx.logger.info({ chatId: chat.teams_chat_id }, 'allowed chat updated');
+    setFlash(req, 'Chat updated.');
     return reply.redirect('/chats');
   });
 

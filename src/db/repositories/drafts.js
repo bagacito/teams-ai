@@ -10,6 +10,9 @@ export function createDraftRepo(db) {
     bySource: db.prepare(
       "SELECT * FROM drafts WHERE source_message_id = ? AND status IN ('pending','edited','sending','sent') ORDER BY id DESC LIMIT 1",
     ),
+    activeForChat: db.prepare(
+      "SELECT * FROM drafts WHERE chat_id = ? AND status IN ('pending','edited','sending') ORDER BY id DESC LIMIT 1",
+    ),
     anyForSource: db.prepare('SELECT 1 FROM drafts WHERE source_message_id = ? LIMIT 1'),
     list: db.prepare('SELECT * FROM drafts WHERE status = ? ORDER BY created_at DESC, id DESC'),
     recent: db.prepare('SELECT * FROM drafts ORDER BY created_at DESC, id DESC LIMIT ?'),
@@ -101,6 +104,18 @@ export function createDraftRepo(db) {
     },
     reject(id) {
       return transition(id, ACTIVE_STATUSES, { status: 'rejected' });
+    },
+    findActiveForChat(chatId) {
+      return stmts.activeForChat.get(chatId);
+    },
+    // pending -> superseded: a newer message arrived and the pending draft
+    // does not cover it; a fresh draft will be generated for the whole batch.
+    // 'edited' drafts are never superseded (user already worked on them).
+    supersede(id) {
+      return transition(id, ['pending'], {
+        status: 'superseded',
+        error: 'superseded: newer messages arrived in this chat',
+      });
     },
     // Failed draft can be retried back into edited/pending state by re-claiming.
     expireOld(hours) {

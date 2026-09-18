@@ -133,6 +133,9 @@ export function makeCtx() {
     notifier: ctx.notifier,
     myUserId: ME,
     myEmail: ME_EMAIL,
+    // Tests default to the immediate (no-debounce) draft path; debounce tests
+    // build their own pipeline with debounceMs > 0.
+    debounceMs: 0,
     // Late-binding: tests may reassign ctx.generate.
     generate: (args) => ctx.generate(args),
   });
