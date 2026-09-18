@@ -5,12 +5,13 @@ import { esc } from '../views/layout.js';
 const addChatSchema = z.object({
   teams_chat_id: z.string().trim().min(1).max(300),
   display_name: z.string().trim().max(200).default(''),
-  context: z.string().max(5000).default(''),
+  // No length cap: contexts can hold whole knowledge bases (DB column is TEXT).
+  context: z.string().default(''),
 });
 
 const editChatSchema = z.object({
   display_name: z.string().trim().max(200).default(''),
-  context: z.string().max(5000).default(''),
+  context: z.string().default(''),
 });
 
 export function registerChatRoutes(app, ctx) {
@@ -253,7 +254,10 @@ export function registerChatRoutes(app, ctx) {
       setFlash(req, `Invalid input: ${parsed.error.issues[0]?.message}`, 'error');
       return reply.redirect(`/chats/${chat.id}/edit`);
     }
-    chatRepo.update(chat.id, parsed.data);
+    chatRepo.update(chat.id, {
+      displayName: parsed.data.display_name,
+      context: parsed.data.context,
+    });
     ctx.logger.info({ chatId: chat.teams_chat_id }, 'allowed chat updated');
     setFlash(req, 'Chat updated.');
     return reply.redirect('/chats');
