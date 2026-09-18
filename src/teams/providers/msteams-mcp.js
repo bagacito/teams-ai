@@ -120,7 +120,22 @@ export function createMsTeamsMcpProvider({ logger = { info() {}, warn() {}, erro
     });
   }
 
-  const authRequired = (error) => ({ ok: false, error, errorType: 'AUTH_REQUIRED' });
+  function buildStatus(d, messagingOk, directOk, needsLogin) {
+  return {
+    ok: true,
+    authenticated: messagingOk || directOk,
+    loginRequired: needsLogin,
+    error: needsLogin ? 'Teams login required' : null,
+    details: {
+      messaging: messagingOk,
+      directApi: directOk,
+      sessionExists: d?.session?.exists === true,
+      sessionLikelyExpired: d?.session?.likelyExpired === true,
+    },
+  };
+}
+
+const authRequired = (error) => ({ ok: false, error, errorType: 'AUTH_REQUIRED' });
 
   // Own MRI (e.g. "8:orgid:<guid>") for isFromMe detection, cached per process.
   let ownMriCache = null;
@@ -148,18 +163,26 @@ export function createMsTeamsMcpProvider({ logger = { info() {}, warn() {}, erro
       const needsLogin = d?.teamsAuthService?.needsInteractiveLogin === true;
       const messagingOk = d?.messaging?.available === true;
       const directOk = d?.directApi?.available === true;
-      return {
-        ok: true,
-        authenticated: messagingOk || directOk,
-        loginRequired: needsLogin,
-        error: needsLogin ? 'Teams login required' : null,
-        details: {
-          messaging: messagingOk,
-          directApi: directOk,
-          sessionExists: d?.session?.exists === true,
-          sessionLikelyExpired: d?.session?.likelyExpired === true,
-        },
-      };
+      // The status tool reads the token store without refreshing it, so an
+      // expired-but-refreshable session looks unauthenticated forever. A real
+      // API call triggers msteams-mcp auto-refresh; probe with get_me, then
+      // re-read status. Retry at most once to keep the poller cheap.
+      if (!(messagingOk || directOk) && !needsLogin) {
+        const probe = await callCli(TOOL.GET_ME);
+        if (probe.ok) {
+          const again = await callCli(TOOL.STATUS);
+          if (again.ok) {
+            const d2 = again.data ?? {};
+            const messagingOk2 = d2?.messaging?.available === true;
+            const directOk2 = d2?.directApi?.available === true;
+            const needsLogin2 = d2?.teamsAuthService?.needsInteractiveLogin === true;
+            if (messagingOk2 || directOk2) {
+              return buildStatus(d2, messagingOk2, directOk2, needsLogin2);
+            }
+          }
+        }
+      }
+      return buildStatus(d, messagingOk, directOk, needsLogin);
     },
 
     // { ok, user: { id, displayName, email } }
