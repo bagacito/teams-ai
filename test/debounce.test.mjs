@@ -164,3 +164,48 @@ test('no debounce (immediate mode) keeps the classic one-draft-per-message flow'
   assert.equal(r2.processed, true);
   assert.equal(ctx.repos.draftRepo.listByStatus('pending').length, 2);
 });
+
+// ── Already-answered safeguard ───────────────────────────────────────────────
+
+test('poller retry does not draft for a message I already answered later', async () => {
+  const ctx = makeCtx();
+  seed(ctx, { aliceAllowed: true });
+  // Thread as stored: their question, then my answer.
+  ctx.repos.messageRepo.save({
+    teamsMessageId: 'q1', chatId: CHAT1, senderId: 'alice-user-id', senderName: 'Alice',
+    content: 'Can you review my PR?', isMe: false,
+  });
+  ctx.repos.messageRepo.save({
+    teamsMessageId: 'a1', chatId: CHAT1, senderId: 'me-user-id', senderName: 'Me',
+    content: 'Already reviewed it, left comments.', isMe: true,
+  });
+  // Retry path reprocesses the old question (no draft was ever created for it).
+  const res = await ctx.pipeline.processMessage(
+    {
+      eventId: null, teamsMessageId: 'q1', chatId: CHAT1, senderId: 'alice-user-id',
+      senderName: 'Alice', content: 'Can you review my PR?', messageType: 'message',
+      replyTo: null, isMe: false, mentionsMe: false, chatName: '', timestamp: '',
+    },
+    { retry: true },
+  );
+  assert.equal(res.processed, false);
+  assert.equal(res.reason, 'already-answered');
+  assert.equal(ctx.repos.draftRepo.listByStatus('pending').length, 0);
+});
+
+test('debounce flush is skipped when I reply myself during the window', async () => {
+  const ctx = makeDebounced(makeCtx());
+  seed(ctx, { aliceAllowed: true });
+
+  await ingest(ctx, { content: 'Can you review my PR?' });
+  // I answer it myself before the quiet period elapses.
+  await ingest(ctx, {
+    eventId: 'evt-own', messageId: 'own-1', senderId: 'me-user-id', senderEmail: 'me@company.com',
+    content: 'On it, will report back shortly.',
+  });
+  assert.equal(ctx.repos.draftRepo.listByStatus('pending').length, 0); // own message never drafts
+
+  await sleep(120);
+  assert.equal(ctx.repos.draftRepo.listByStatus('pending').length, 0); // flush skipped
+  assert.equal(ctx.notifications.length, 0);
+});

@@ -11,6 +11,15 @@ export function createMessageRepo(db) {
     getById: db.prepare('SELECT * FROM messages WHERE teams_message_id = ?'),
     countForChat: db.prepare('SELECT COUNT(*) AS c FROM messages WHERE chat_id = ?'),
     myCount: db.prepare('SELECT COUNT(*) AS c FROM messages WHERE is_me = 1'),
+    // Messages are inserted in conversation order (poller processes
+    // oldest→newest), so a higher id means a later position in the thread.
+    ownAfter: db.prepare(`
+      SELECT EXISTS(
+        SELECT 1 FROM messages later
+        JOIN messages source ON source.chat_id = later.chat_id AND source.id < later.id
+        WHERE source.chat_id = ? AND source.teams_message_id = ? AND later.is_me = 1
+      ) AS c
+    `),
   };
 
   return {
@@ -44,6 +53,11 @@ export function createMessageRepo(db) {
     },
     myMessageCount() {
       return stmts.myCount.get().c;
+    },
+    // True when a message from me is stored LATER in the thread than the
+    // given message — i.e. I already answered it; no draft should be made.
+    hasOwnMessageAfter(chatId, teamsMessageId) {
+      return !!stmts.ownAfter.get(chatId, teamsMessageId).c;
     },
   };
 }

@@ -73,6 +73,15 @@ export function createIngestionPipeline(deps) {
   // Shared tail of draft creation: generate + notify. Returns the draft row
   // (or { noReply: true } / null). Never sends anything to Teams.
   async function draftAndNotify(record) {
+    // Safeguard: if I already answered later in this thread, older messages
+    // must not produce drafts (e.g. poller retries, debounce flushes).
+    if (messageRepo.hasOwnMessageAfter(record.chatId, record.teamsMessageId)) {
+      log.info(
+        { messageId: record.teamsMessageId, chatId: record.chatId },
+        'draft skipped: already answered by me later in the thread',
+      );
+      return { answered: true };
+    }
     const chatRow = policy.getChat(record.chatId);
     const draft = await createDraftForMessage({
       record,
@@ -132,6 +141,9 @@ export function createIngestionPipeline(deps) {
             // generate a second response for the same messages.
             const active = draftRepo.findActiveForChat(chatId);
             if (active && active.status !== 'pending') return;
+            // If the user replied themselves while the flush was waiting, the
+            // messages are answered — do not supersede, do not draft.
+            if (messageRepo.hasOwnMessageAfter(chatId, record.teamsMessageId)) return;
             if (active) draftRepo.supersede(active.id);
             await draftAndNotify(record);
           },
@@ -227,6 +239,7 @@ export function createIngestionPipeline(deps) {
     }
 
     const result = await draftAndNotify(record);
+    if (result?.answered) return { processed: false, reason: 'already-answered' };
     if (result?.noReply) return { processed: false, reason: 'ai-no-reply' };
     if (!result) return { processed: false, reason: 'generation-failed' };
     return { processed: true, draftId: result.draft.id };

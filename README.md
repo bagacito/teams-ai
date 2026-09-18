@@ -136,6 +136,8 @@ Poll behaviour:
 - skips chats whose last message matches the stored cursor;
 - sorts new messages oldest→newest, deduplicates by Teams message ID;
 - your own messages are stored (for history/style) but never drafted;
+- **no drafts for answered messages**: if you already replied later in the
+  thread, older messages never produce drafts (retry/flush paths included);
 - **message batching**: after a response-worthy message, drafting waits
   `DRAFT_DEBOUNCE_SECONDS` (default 90) of quiet in that chat, so messages
   split across several sends produce ONE draft covering all of them. If a
